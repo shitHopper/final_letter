@@ -1,0 +1,348 @@
+import { useState, useEffect } from 'react'
+import { apiFetch } from '../api'
+
+const PUSH_METHODS = [
+  { value: 1, label: '电子邮件' },
+  { value: 2, label: '手机短信' },
+  { value: 3, label: '实体邮信' },
+  { value: 4, label: '公开到社区' },
+]
+
+function Modal({ children, onClose }) {
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-content" onClick={e => e.stopPropagation()}>
+        {children}
+      </div>
+    </div>
+  )
+}
+
+function PasswordModal({ onVerified, onClose, isSet }) {
+  const [password, setPassword] = useState('')
+  const [confirmPwd, setConfirmPwd] = useState('')
+  const [error, setError] = useState('')
+
+  const handleSubmit = (e) => {
+    e.preventDefault()
+    if (!isSet) {
+      if (password.length < 4) { setError('密码至少4位'); return }
+      if (password !== confirmPwd) { setError('两次密码不一致'); return }
+      onVerified(password)
+    } else {
+      onVerified(password)
+    }
+  }
+
+  return (
+    <Modal onClose={onClose}>
+      <h3>{isSet ? '输入密码' : '设置查看密码'}</h3>
+      <p className="modal-hint">{isSet ? '查看信件需要验证密码' : '首次查看信件，请设置一个密码'}</p>
+      <form onSubmit={handleSubmit}>
+        <input
+          type="password"
+          placeholder={isSet ? '请输入密码' : '设置密码（至少4位）'}
+          value={password}
+          onChange={e => { setPassword(e.target.value); setError('') }}
+          autoFocus
+        />
+        {!isSet && (
+          <input
+            type="password"
+            placeholder="确认密码"
+            value={confirmPwd}
+            onChange={e => { setConfirmPwd(e.target.value); setError('') }}
+            style={{ marginTop: 8 }}
+          />
+        )}
+        {error && <div className="modal-error">{error}</div>}
+        <div className="btn-row" style={{ marginTop: 12 }}>
+          <button className="btn btn-primary" type="submit">确认</button>
+          <button className="btn" type="button" onClick={onClose}>取消</button>
+        </div>
+      </form>
+    </Modal>
+  )
+}
+
+function ConfirmModal({ title, message, onConfirm, onCancel }) {
+  return (
+    <Modal onClose={onCancel}>
+      <h3>{title}</h3>
+      <p className="modal-hint">{message}</p>
+      <div className="btn-row" style={{ marginTop: 16 }}>
+        <button className="btn btn-danger" onClick={onConfirm}>确认删除</button>
+        <button className="btn" onClick={onCancel}>取消</button>
+      </div>
+    </Modal>
+  )
+}
+
+export default function LettersPage({ userId }) {
+  const [letters, setLetters] = useState([])
+  const [showForm, setShowForm] = useState(false)
+  const [form, setForm] = useState({ title: '', content: '', pushMethod: 1, pushTarget: '', password: '' })
+  const [msg, setMsg] = useState('')
+  const [viewingLetter, setViewingLetter] = useState(null)
+  const [editingLetter, setEditingLetter] = useState(null)
+  const [editForm, setEditForm] = useState({ title: '', content: '', pushMethod: 1, pushTarget: '', password: '' })
+  const [pwdModalTarget, setPwdModalTarget] = useState(null)
+  const [deleteTarget, setDeleteTarget] = useState(null)
+
+  const fetchLetters = async () => {
+    const res = await apiFetch('/api/letters')
+    setLetters(await res.json())
+  }
+
+  useEffect(() => { fetchLetters() }, [])
+
+  const createLetter = async (e) => {
+    e.preventDefault()
+    const res = await apiFetch('/api/letters', {
+      method: 'POST',
+      body: JSON.stringify({ ...form }),
+    })
+    const data = await res.json()
+    if (data.success) {
+      setForm({ title: '', content: '', pushMethod: 1, pushTarget: '', password: '' })
+      setShowForm(false)
+      fetchLetters()
+      setMsg('信件已保存')
+    }
+    setTimeout(() => setMsg(''), 2000)
+  }
+
+  const updateLetter = async () => {
+    const res = await apiFetch(`/api/letters/${editingLetter.id}`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        title: editForm.title,
+        content: editForm.content,
+        pushMethod: editForm.pushMethod,
+        pushTarget: editForm.pushTarget,
+        password: editForm.password || undefined,
+      }),
+    })
+    const data = await res.json()
+    if (data.success) {
+      setEditingLetter(null)
+      setViewingLetter(null)
+      fetchLetters()
+      setMsg('信件已更新')
+    }
+    setTimeout(() => setMsg(''), 2000)
+  }
+
+  const doDelete = async (id) => {
+    await apiFetch(`/api/letters/${id}`, { method: 'DELETE' })
+    setDeleteTarget(null)
+    setViewingLetter(null)
+    fetchLetters()
+  }
+
+  const handleViewLetter = async (letter) => {
+    // 无密码的信件直接打开
+    if (!letter.password) {
+      const res = await apiFetch(`/api/letters/${letter.id}`)
+      const data = await res.json()
+      setViewingLetter(data)
+      return
+    }
+    // 有密码则弹窗
+    setPwdModalTarget(letter)
+  }
+
+  const onPasswordSubmit = async (password) => {
+    const res = await apiFetch(`/api/letters/${pwdModalTarget.id}/verify`, {
+      method: 'POST',
+      body: JSON.stringify({ password }),
+    })
+    const data = await res.json()
+    if (data.verified) {
+      const detail = await apiFetch(`/api/letters/${pwdModalTarget.id}`)
+      const letter = await detail.json()
+      setViewingLetter(letter)
+      setPwdModalTarget(null)
+    } else {
+      // 密码错误由 modal 内处理——这里通过回传让 modal 显示错误
+      // 重新渲染 modal 并提示
+      alert(data.error || '密码错误')
+    }
+  }
+
+  const startEdit = () => {
+    setEditForm({
+      title: viewingLetter.title,
+      content: viewingLetter.content,
+      pushMethod: viewingLetter.push_method,
+      pushTarget: viewingLetter.push_target,
+      password: '',
+    })
+    setEditingLetter(viewingLetter)
+  }
+
+  const methodLabel = (v) => PUSH_METHODS.find(m => m.value === v)?.label || '未知'
+
+  const parseUTC = (dateStr) => {
+    const utcStr = dateStr.includes('T') ? dateStr : dateStr.replace(' ', 'T') + 'Z'
+    return new Date(utcStr)
+  }
+
+  return (
+    <div className="page letters-page">
+      <div className="page-header">
+        <h2>我的信件</h2>
+        <button className="btn btn-primary" onClick={() => setShowForm(!showForm)}>
+          {showForm ? '取消' : '写信'}
+        </button>
+      </div>
+
+      {showForm && (
+        <form className="card letter-form" onSubmit={createLetter}>
+          <input
+            placeholder="信件标题"
+            value={form.title}
+            onChange={e => setForm({ ...form, title: e.target.value })}
+            required
+          />
+          <textarea
+            placeholder="写下你想说的话..."
+            rows={6}
+            value={form.content}
+            onChange={e => setForm({ ...form, content: e.target.value })}
+            required
+          />
+          <div className="form-row">
+            <label>推送方式</label>
+            <select
+              value={form.pushMethod}
+              onChange={e => setForm({ ...form, pushMethod: Number(e.target.value) })}
+            >
+              {PUSH_METHODS.map(m => (
+                <option key={m.value} value={m.value}>{m.label}</option>
+              ))}
+            </select>
+          </div>
+          <input
+            placeholder={form.pushMethod === 1 ? '邮箱地址' : form.pushMethod === 2 ? '手机号码' : form.pushMethod === 3 ? '邮寄地址' : '（公开到社区无需填写）'}
+            value={form.pushTarget}
+            onChange={e => setForm({ ...form, pushTarget: e.target.value })}
+            required={form.pushMethod !== 4}
+          />
+          <input
+            type="password"
+            placeholder="查看密码（可选，保护信件隐私）"
+            value={form.password}
+            onChange={e => setForm({ ...form, password: e.target.value })}
+          />
+          <button className="btn btn-primary" type="submit">保存信件</button>
+        </form>
+      )}
+
+      {msg && <div className="msg">{msg}</div>}
+
+      <div className="letter-list">
+        {letters.length === 0 && <div className="empty">还没有信件，点击"写信"开始</div>}
+        {letters.map(letter => (
+          <div key={letter.id} className="card letter-card" onClick={() => handleViewLetter(letter)}>
+            <div className="letter-header">
+              <strong>{letter.title}</strong>
+              <span className={`badge badge-${letter.push_method}`}>
+                {methodLabel(letter.push_method)}
+              </span>
+              {letter.password && <span className="badge badge-lock">🔒</span>}
+            </div>
+            <p className="letter-preview">点击查看完整内容</p>
+            <div className="letter-footer">
+              <span className="letter-date">{parseUTC(letter.created_at).toLocaleDateString()}</span>
+              <button
+                className="btn btn-danger btn-sm"
+                onClick={e => { e.stopPropagation(); setDeleteTarget(letter.id) }}
+              >
+                删除
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {pwdModalTarget && (
+        <PasswordModal
+          isSet={!!pwdModalTarget.password}
+          onVerified={onPasswordSubmit}
+          onClose={() => setPwdModalTarget(null)}
+        />
+      )}
+
+      {viewingLetter && !editingLetter && (
+        <Modal onClose={() => setViewingLetter(null)}>
+          <h3>{viewingLetter.title}</h3>
+          <span className={`badge badge-${viewingLetter.push_method}`} style={{ marginBottom: 8 }}>
+            {methodLabel(viewingLetter.push_method)}
+          </span>
+          <div className="letter-full-content">{viewingLetter.content}</div>
+          <div className="letter-meta">
+            <span>推送目标：{viewingLetter.push_target || '无'}</span>
+            <span>创建时间：{parseUTC(viewingLetter.created_at).toLocaleString()}</span>
+          </div>
+          <div className="btn-row" style={{ marginTop: 16 }}>
+            <button className="btn btn-primary" onClick={startEdit}>编辑</button>
+            <button className="btn" onClick={() => setViewingLetter(null)}>关闭</button>
+          </div>
+        </Modal>
+      )}
+
+      {editingLetter && (
+        <Modal onClose={() => { setEditingLetter(null); setViewingLetter(null) }}>
+          <h3>编辑信件</h3>
+          <div className="letter-edit-form">
+            <input
+              value={editForm.title}
+              onChange={e => setEditForm({ ...editForm, title: e.target.value })}
+            />
+            <textarea
+              rows={8}
+              value={editForm.content}
+              onChange={e => setEditForm({ ...editForm, content: e.target.value })}
+            />
+            <div className="form-row">
+              <label>推送方式</label>
+              <select
+                value={editForm.pushMethod}
+                onChange={e => setEditForm({ ...editForm, pushMethod: Number(e.target.value) })}
+              >
+                {PUSH_METHODS.map(m => (
+                  <option key={m.value} value={m.value}>{m.label}</option>
+                ))}
+              </select>
+            </div>
+            <input
+              value={editForm.pushTarget}
+              onChange={e => setEditForm({ ...editForm, pushTarget: e.target.value })}
+              placeholder="推送目标"
+            />
+            <input
+              type="password"
+              value={editForm.password}
+              onChange={e => setEditForm({ ...editForm, password: e.target.value })}
+              placeholder={editingLetter.password ? '留空保持原密码' : '设置查看密码（可选）'}
+            />
+            <div className="btn-row">
+              <button className="btn btn-primary" onClick={updateLetter}>保存</button>
+              <button className="btn" onClick={() => setEditingLetter(null)}>取消</button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {deleteTarget && (
+        <ConfirmModal
+          title="确认删除"
+          message="确定要删除这封信吗？删除后不可恢复。"
+          onConfirm={() => doDelete(deleteTarget)}
+          onCancel={() => setDeleteTarget(null)}
+        />
+      )}
+    </div>
+  )
+}

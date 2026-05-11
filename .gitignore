@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+
+# Database
+*.db
+
+# Uploads
+backend/uploads/
+
+# Environment
+.env
+.env.*
+
+# Build
+dist/
+dist-ssr/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Editor
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+.DS_Store
+*.local
+
+# Claude
+.claude/
