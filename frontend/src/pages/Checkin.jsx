@@ -169,6 +169,11 @@ export default function CheckinPage({ userId }) {
         <div className="progress-bar">
           <div className="progress-fill" style={{ width: `${pct}%` }} />
         </div>
+        {info.overdue && info.unsentLetterCount > 0 && (
+          <div className="overdue-warning">
+            您有 {info.unsentLetterCount} 封遗书等待发送，请尽快打卡！
+          </div>
+        )}
       </div>
 
       <div className="warm-quote-card">

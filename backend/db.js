@@ -111,6 +111,11 @@ async function initDb() {
     db.run("ALTER TABLE users ADD COLUMN force_reset INTEGER DEFAULT 0");
   } catch (e) { /* column already exists */ }
 
+  // Migrate: add sent_at to letters if missing
+  try {
+    db.run("ALTER TABLE letters ADD COLUMN sent_at TEXT DEFAULT NULL");
+  } catch (e) { /* column already exists */ }
+
   // Mark existing accounts without a password as needing reset
   const pwRows = db.exec("SELECT id FROM users WHERE password IS NULL");
   if (pwRows.length > 0 && pwRows[0].values.length > 0) {

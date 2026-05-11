@@ -184,6 +184,7 @@ export default function LettersPage({ userId }) {
   const methodLabel = (v) => PUSH_METHODS.find(m => m.value === v)?.label || '未知'
 
   const parseUTC = (dateStr) => {
+    if (!dateStr) return null
     const utcStr = dateStr.includes('T') ? dateStr : dateStr.replace(' ', 'T') + 'Z'
     return new Date(utcStr)
   }
@@ -247,12 +248,23 @@ export default function LettersPage({ userId }) {
           <div key={letter.id} className="card letter-card" onClick={() => handleViewLetter(letter)}>
             <div className="letter-header">
               <strong>{letter.title}</strong>
-              <span className={`badge badge-${letter.push_method}`}>
-                {methodLabel(letter.push_method)}
-              </span>
-              {letter.password && <span className="badge badge-lock">🔒</span>}
+              <div className="letter-badges">
+                <span className={`badge badge-${letter.push_method}`}>
+                  {methodLabel(letter.push_method)}
+                </span>
+                {letter.is_sent ? (
+                  <span className="badge badge-sent">已送达</span>
+                ) : (
+                  <span className="badge badge-pending">待发送</span>
+                )}
+                {letter.password && <span className="badge badge-lock">🔒</span>}
+              </div>
             </div>
-            <p className="letter-preview">点击查看完整内容</p>
+            <p className="letter-preview">
+              {letter.is_sent && letter.sent_at
+                ? `已于 ${parseUTC(letter.sent_at)?.toLocaleString()} 送达`
+                : '点击查看完整内容'}
+            </p>
             <div className="letter-footer">
               <span className="letter-date">{parseUTC(letter.created_at).toLocaleDateString()}</span>
               <button

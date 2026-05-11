@@ -1,9 +1,9 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import CheckinPage from './pages/Checkin'
 import LettersPage from './pages/Letters'
 import CommunityPage from './pages/Community'
 import ProfilePage from './pages/Profile'
-import { isLoggedIn, logout, apiFetch } from './api'
+import { isLoggedIn, logout, apiFetch, setOnUnauthorized } from './api'
 import './App.css'
 
 const tabs = [
@@ -137,6 +137,16 @@ function App() {
   const [user, setUser] = useState(null)
   const [loading, setLoading] = useState(true)
   const [activeTab, setActiveTab] = useState('checkin')
+
+  const handleUnauthorized = useCallback(() => {
+    setUser(null)
+    // 清除后端 httpOnly cookie
+    fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" })
+  }, [])
+
+  useEffect(() => {
+    setOnUnauthorized(handleUnauthorized)
+  }, [handleUnauthorized])
 
   useEffect(() => {
     if (!isLoggedIn()) { setLoading(false); return }

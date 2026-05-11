@@ -1,4 +1,5 @@
 const express = require("express");
+require("dotenv").config();
 const cors = require("cors");
 const cookieParser = require("cookie-parser");
 const multer = require("multer");
@@ -7,6 +8,7 @@ const crypto = require("crypto");
 const jwt = require("jsonwebtoken");
 const rateLimit = require("express-rate-limit");
 const { initDb } = require("./db");
+const { startScheduler } = require("./scheduler");
 
 const app = express();
 const CORS_ORIGINS = process.env.CORS_ORIGINS
@@ -182,8 +184,11 @@ app.post("/api/auth/login", authLimiter, (req, res) => {
   const user = get("SELECT * FROM users WHERE nickname = ?", [nickname.trim()]);
   if (!user)
     return res.status(401).json({ error: "昵称或密码错误" });
-  if (!user.password)
-    return res.status(403).json({ error: "请先设置密码", forceReset: true });
+  if (!user.password) {
+    const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: "7d" });
+    res.cookie("token", token, COOKIE_OPTIONS);
+    return res.json({ token, user: { id: user.id, nickname: user.nickname, forceReset: true } });
+  }
   if (!verifyPassword(password, user.password))
     return res.status(401).json({ error: "昵称或密码错误" });
   const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: "7d" });
@@ -225,12 +230,16 @@ app.get("/api/checkin", auth, (req, res) => {
   const remaining = deadline ? Math.max(0, deadline - now) : 0;
   const overdue = deadline ? now > deadline.getTime() : false;
 
+  // 查询是否有未发送的遗书
+  const unsentLetters = all("SELECT id, title, push_method FROM letters WHERE user_id = ? AND is_sent = 0", [req.user.id]);
+
   res.json({
     lastCheckin: user.last_checkin_at,
     intervalDays: user.checkin_interval_days,
     deadline: deadline?.toISOString(),
     remainingMs: remaining,
     overdue,
+    unsentLetterCount: unsentLetters.length,
   });
 });
 
@@ -487,6 +496,7 @@ app.get("/api/nearby-clinics", async (req, res) => {
 initDb().then(({ db: _db, save }) => {
   db = _db;
   saveDb = save;
+  startScheduler(db, saveDb);
   const PORT = 3001;
   app.listen(PORT, () => {
     console.log(`绝笔信后端已启动: http://localhost:${PORT}`);
