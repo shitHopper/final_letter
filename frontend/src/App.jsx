@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, Component } from 'react'
 import CheckinPage from './pages/Checkin'
 import LettersPage from './pages/Letters'
 import CommunityPage from './pages/Community'
@@ -215,4 +215,23 @@ function App() {
   )
 }
 
-export default App
+class ErrorBoundary extends Component {
+  state = { error: null }
+  static getDerivedStateFromError(error) { return { error } }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ padding: 20, color: '#c00' }}>
+          <h2>页面出错了</h2>
+          <pre style={{ whiteSpace: 'pre-wrap', fontSize: 13 }}>{this.state.error?.message || String(this.state.error)}</pre>
+          <button onClick={() => { this.setState({ error: null }); window.location.reload() }} style={{ marginTop: 12, padding: '8px 16px' }}>刷新重试</button>
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
+
+export default function AppWithBoundary() {
+  return <ErrorBoundary><App /></ErrorBoundary>
+}

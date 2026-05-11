@@ -11,6 +11,7 @@ const { initDb } = require("./db");
 const { startScheduler } = require("./scheduler");
 
 const app = express();
+app.set("trust proxy", 1);
 const CORS_ORIGINS = process.env.CORS_ORIGINS
   ? process.env.CORS_ORIGINS.split(",")
   : ["http://localhost:5173", "http://localhost:4173"];
@@ -37,8 +38,8 @@ app.use((req, res, next) => {
 
 const COOKIE_OPTIONS = {
   httpOnly: true,
-  sameSite: "lax",
-  secure: process.env.NODE_ENV === "production",
+  sameSite: "none",
+  secure: true,
   maxAge: 7 * 24 * 60 * 60 * 1000,
   path: "/",
 };
@@ -158,8 +159,7 @@ function verifyPassword(password, stored) {
 
 
 // 托管前端文件夹，访问域名直接打开网页
-app.use(express.static(path.join(__dirname, '../frontend')));
-
+app.use(express.static(path.join(__dirname, '../frontend/dist')));
 
 // ========== 认证模块 ==========
 
@@ -478,15 +478,20 @@ app.get("/api/nearby-clinics", async (req, res) => {
     ]});
   }
   try {
-    const url = `https://restapi.amap.com/v3/place/text?key=${AMAP_KEY}&keywords=心理咨询&location=${numLng},${numLat}&offset=5&output=json`;
+    const url = `https://restapi.amap.com/v3/place/around?key=${AMAP_KEY}&keywords=心理咨询&location=${numLng},${numLat}&radius=10000&offset=5&output=json`;
     const r = await fetch(url);
     const data = await r.json();
-    const pois = (data.pois || []).map(poi => ({
-      name: poi.name,
-      address: poi.address || poi.pname + poi.cityname + poi.adname,
-      distance: poi.distance ? `${(poi.distance / 1000).toFixed(1)}km` : "",
-      tel: poi.tel || "",
-    }));
+    const pois = (data.pois || []).map(poi => {
+      const dist = Number(poi.distance);
+      return {
+        name: poi.name,
+        address: poi.address || poi.pname + poi.cityname + poi.adname,
+        distance: poi.distance && Number.isFinite(dist) && dist > 0
+          ? (dist >= 1000 ? `${(dist / 1000).toFixed(1)}km` : `${Math.round(dist)}m`)
+          : "",
+        tel: Array.isArray(poi.tel) ? poi.tel.join(", ") : (poi.tel || ""),
+      };
+    });
     res.json({ fallback: false, pois });
   } catch {
     res.json({ fallback: true, pois: [
@@ -495,6 +500,11 @@ app.get("/api/nearby-clinics", async (req, res) => {
       { name: "广州市惠爱医院", address: "广州市荔湾区明心路36号", tel: "020-81899120" },
     ]});
   }
+});
+
+// SPA fallback: 所有非 API/非静态资源请求返回 index.html，交给前端路由处理
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, '../frontend/dist/index.html'));
 });
 
 // ========== 启动 ==========

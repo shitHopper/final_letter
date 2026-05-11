@@ -44,6 +44,7 @@ export default function CommunityPage({ userId }) {
     const formData = new FormData()
     formData.append('image', file)
     const res = await apiFetch('/api/upload', { method: 'POST', body: formData })
+    if (!res.ok) throw new Error('图片上传失败')
     const data = await res.json()
     return data.url
   }
@@ -51,20 +52,26 @@ export default function CommunityPage({ userId }) {
   const createPost = async () => {
     if (!newPost.trim() && newImages.length === 0) return
     setUploading(true)
-    let imageUrls = []
-    for (const file of newImages) {
-      const url = await uploadImage(file)
-      imageUrls.push(url)
+    try {
+      let imageUrls = []
+      for (const file of newImages) {
+        const url = await uploadImage(file)
+        imageUrls.push(url)
+      }
+      const res = await apiFetch('/api/posts', {
+        method: 'POST',
+        body: JSON.stringify({ content: newPost, imageUrls }),
+      })
+      if (!res.ok) throw new Error('发布失败')
+      setNewPost('')
+      setNewImages([])
+      setImagePreviews([])
+      fetchPosts()
+    } catch (e) {
+      alert(e.message || '发布失败，请重试')
+    } finally {
+      setUploading(false)
     }
-    await apiFetch('/api/posts', {
-      method: 'POST',
-      body: JSON.stringify({ content: newPost, imageUrls }),
-    })
-    setNewPost('')
-    setNewImages([])
-    setImagePreviews([])
-    setUploading(false)
-    fetchPosts()
   }
 
   const parseImageUrls = (imageUrl) => {
