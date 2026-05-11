@@ -3,7 +3,7 @@ import CheckinPage from './pages/Checkin'
 import LettersPage from './pages/Letters'
 import CommunityPage from './pages/Community'
 import ProfilePage from './pages/Profile'
-import { getToken, setToken, removeToken, isLoggedIn, apiFetch } from './api'
+import { isLoggedIn, logout, apiFetch } from './api'
 import './App.css'
 
 const tabs = [
@@ -12,6 +12,54 @@ const tabs = [
   { key: 'community', label: '社区', icon: '💬' },
   { key: 'profile', label: '个人', icon: '👤' },
 ]
+
+function ForceResetPage({ user, onDone }) {
+  const [password, setPassword] = useState('')
+  const [confirmPwd, setConfirmPwd] = useState('')
+  const [error, setError] = useState('')
+
+  const handleSubmit = async (e) => {
+    e.preventDefault()
+    if (password.length < 4) { setError('密码至少4位'); return }
+    if (password !== confirmPwd) { setError('两次密码不一致'); return }
+    const res = await apiFetch('/api/auth/set-password', {
+      method: 'POST',
+      body: JSON.stringify({ password }),
+    })
+    const data = await res.json()
+    if (data.success) {
+      onDone()
+    } else {
+      setError(data.error || '设置失败')
+    }
+  }
+
+  return (
+    <div className="login-page">
+      <div className="login-card">
+        <h1>设置密码</h1>
+        <p className="login-subtitle">为了您的账号安全，请先设置一个密码</p>
+        <form onSubmit={handleSubmit}>
+          <input
+            type="password"
+            placeholder="设置密码（至少4位）"
+            value={password}
+            onChange={e => { setPassword(e.target.value); setError('') }}
+            autoFocus
+          />
+          <input
+            type="password"
+            placeholder="确认密码"
+            value={confirmPwd}
+            onChange={e => { setConfirmPwd(e.target.value); setError('') }}
+          />
+          {error && <div className="modal-error">{error}</div>}
+          <button className="btn btn-primary" type="submit">确认</button>
+        </form>
+      </div>
+    </div>
+  )
+}
 
 function LoginPage({ onLogin }) {
   const [isRegister, setIsRegister] = useState(false)
@@ -33,8 +81,7 @@ function LoginPage({ onLogin }) {
     })
     const data = await res.json()
     if (data.token) {
-      setToken(data.token)
-      onLogin({ id: data.user.id, nickname: data.user.nickname })
+      onLogin({ id: data.user.id, nickname: data.user.nickname, forceReset: data.user.forceReset })
     } else {
       setError(data.error || (isRegister ? '注册失败' : '登录失败'))
     }
@@ -97,7 +144,7 @@ function App() {
       if (res.ok) return res.json()
       return null
     }).then(data => {
-      if (data) setUser({ id: data.id, nickname: data.nickname })
+      if (data) setUser({ id: data.id, nickname: data.nickname, forceReset: data.forceReset })
       setLoading(false)
     }).catch(() => setLoading(false))
   }, [])
@@ -106,13 +153,17 @@ function App() {
     setUser(u)
   }
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
     setUser(null)
-    removeToken()
+    await logout()
   }
 
   if (loading) return <div className="loading">加载中...</div>
   if (!user) return <LoginPage onLogin={handleLogin} />
+
+  if (user.forceReset) {
+    return <ForceResetPage user={user} onDone={() => setUser({ ...user, forceReset: false })} />
+  }
 
   const renderPage = () => {
     switch (activeTab) {

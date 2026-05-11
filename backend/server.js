@@ -1,5 +1,6 @@
 const express = require("express");
 const cors = require("cors");
+const cookieParser = require("cookie-parser");
 const multer = require("multer");
 const path = require("path");
 const crypto = require("crypto");
@@ -13,6 +14,32 @@ const CORS_ORIGINS = process.env.CORS_ORIGINS
   : ["http://localhost:5173", "http://localhost:4173"];
 app.use(cors({ origin: CORS_ORIGINS, credentials: true }));
 app.use(express.json());
+app.use(cookieParser());
+
+// CSP 响应头，缓解 XSS 攻击
+app.use((req, res, next) => {
+  res.setHeader(
+    "Content-Security-Policy",
+    "default-src 'self'; " +
+    "script-src 'self'; " +
+    "style-src 'self' 'unsafe-inline'; " +
+    "img-src 'self' data: blob:; " +
+    "connect-src 'self' https://restapi.amap.com; " +
+    "font-src 'self'; " +
+    "frame-ancestors 'none'"
+  );
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  next();
+});
+
+const COOKIE_OPTIONS = {
+  httpOnly: true,
+  sameSite: "lax",
+  secure: process.env.NODE_ENV === "production",
+  maxAge: 7 * 24 * 60 * 60 * 1000,
+  path: "/",
+};
 
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) {
@@ -44,10 +71,15 @@ const letterVerifyLimiter = rateLimit({
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
 // Multer config for image uploads
+const UPLOAD_ALLOWED_EXTS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp"]);
+const BLOCKED_MIMES = new Set(["image/svg+xml"]);
+
 const storage = multer.diskStorage({
   destination: path.join(__dirname, "uploads"),
   filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname);
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (!UPLOAD_ALLOWED_EXTS.has(ext))
+      return cb(new Error("不支持的图片格式，仅支持 jpg/png/gif/webp"));
     cb(null, `${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`);
   },
 });
@@ -55,6 +87,8 @@ const upload = multer({
   storage,
   limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
+    if (BLOCKED_MIMES.has(file.mimetype))
+      return cb(new Error("不允许上传 SVG 图片"));
     if (file.mimetype.startsWith("image/")) cb(null, true);
     else cb(new Error("只允许上传图片"));
   },
@@ -92,11 +126,11 @@ function stripPassword(obj) {
 // ========== JWT 认证中间件 ==========
 
 function auth(req, res, next) {
-  const header = req.headers.authorization;
-  if (!header || !header.startsWith("Bearer "))
+  const token = req.cookies?.token || (req.headers.authorization?.startsWith("Bearer ") ? req.headers.authorization.slice(7) : null);
+  if (!token)
     return res.status(401).json({ error: "未登录" });
   try {
-    const payload = jwt.verify(header.slice(7), JWT_SECRET);
+    const payload = jwt.verify(token, JWT_SECRET);
     req.user = { id: payload.userId };
     next();
   } catch {
@@ -135,6 +169,7 @@ app.post("/api/auth/register", authLimiter, (req, res) => {
     [nickname.trim(), hashed, new Date().toISOString()]);
   const user = get("SELECT * FROM users WHERE nickname = ?", [nickname.trim()]);
   const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: "7d" });
+  res.cookie("token", token, COOKIE_OPTIONS);
   res.json({ token, user: { id: user.id, nickname: user.nickname } });
 });
 
@@ -147,16 +182,35 @@ app.post("/api/auth/login", authLimiter, (req, res) => {
   const user = get("SELECT * FROM users WHERE nickname = ?", [nickname.trim()]);
   if (!user)
     return res.status(401).json({ error: "昵称或密码错误" });
+  if (!user.password)
+    return res.status(403).json({ error: "请先设置密码", forceReset: true });
   if (!verifyPassword(password, user.password))
     return res.status(401).json({ error: "昵称或密码错误" });
   const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: "7d" });
-  res.json({ token, user: { id: user.id, nickname: user.nickname } });
+  res.cookie("token", token, COOKIE_OPTIONS);
+  res.json({ token, user: { id: user.id, nickname: user.nickname, forceReset: !!user.force_reset } });
 });
 
 app.get("/api/auth/me", auth, (req, res) => {
   const user = get("SELECT * FROM users WHERE id = ?", [req.user.id]);
   if (!user) return res.status(404).json({ error: "用户不存在" });
-  res.json(stripPassword(user));
+  const safe = stripPassword(user);
+  safe.forceReset = !!user.force_reset;
+  res.json(safe);
+});
+
+app.post("/api/auth/logout", (req, res) => {
+  res.clearCookie("token", { path: "/" });
+  res.json({ success: true });
+});
+
+app.post("/api/auth/set-password", auth, (req, res) => {
+  const { password } = req.body;
+  if (!password || password.length < 4)
+    return res.status(400).json({ error: "密码至少4位" });
+  const hashed = hashPassword(password);
+  run("UPDATE users SET password = ?, force_reset = 0 WHERE id = ?", [hashed, req.user.id]);
+  res.json({ success: true });
 });
 
 // ========== 打卡模块 ==========
@@ -281,19 +335,34 @@ app.get("/api/posts", auth, (req, res) => {
   res.json(posts);
 });
 
+const ALLOWED_IMAGE_EXTS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp"]);
+
+function validateImageUrl(url) {
+  if (typeof url !== "string") return false;
+  if (!url.startsWith("/uploads/")) return false;
+  const ext = path.extname(url).toLowerCase();
+  return ALLOWED_IMAGE_EXTS.has(ext);
+}
+
 app.post("/api/posts", auth, (req, res) => {
   const { content, imageUrls } = req.body;
   if (!content) return res.status(400).json({ error: "缺少必填字段" });
-  const urls = Array.isArray(imageUrls) ? JSON.stringify(imageUrls) : (imageUrls || "[]");
+  const urls = Array.isArray(imageUrls) ? imageUrls : [];
+  if (urls.length > 9) return res.status(400).json({ error: "最多上传9张图片" });
+  for (const u of urls) {
+    if (!validateImageUrl(u)) return res.status(400).json({ error: "图片链接无效" });
+  }
   run(
     "INSERT INTO posts (user_id, content, image_url) VALUES (?, ?, ?)",
-    [req.user.id, content, urls]
+    [req.user.id, content, JSON.stringify(urls)]
   );
   const row = get("SELECT last_insert_rowid() as id");
   res.json({ id: row.id, success: true });
 });
 
 app.post("/api/posts/:id/like", auth, (req, res) => {
+  const post = get("SELECT id FROM posts WHERE id = ?", [req.params.id]);
+  if (!post) return res.status(404).json({ error: "帖子不存在" });
   const existing = get("SELECT * FROM post_likes WHERE post_id = ? AND user_id = ?", [req.params.id, req.user.id]);
 
   if (existing) {
@@ -319,9 +388,17 @@ app.get("/api/posts/:id/comments", auth, (req, res) => {
 app.post("/api/posts/:id/comments", auth, (req, res) => {
   const { content, replyToId } = req.body;
   if (!content) return res.status(400).json({ error: "缺少必填字段" });
+  const post = get("SELECT id FROM posts WHERE id = ?", [req.params.id]);
+  if (!post) return res.status(404).json({ error: "帖子不存在" });
+  let replyTo = replyToId || null;
+  if (replyTo) {
+    const parentComment = get("SELECT id, post_id FROM comments WHERE id = ?", [replyTo]);
+    if (!parentComment || parentComment.post_id !== Number(req.params.id))
+      return res.status(400).json({ error: "回复的评论不存在或不属于该帖子" });
+  }
   run(
     "INSERT INTO comments (post_id, user_id, content, reply_to_id) VALUES (?, ?, ?, ?)",
-    [req.params.id, req.user.id, content, replyToId || null]
+    [req.params.id, req.user.id, content, replyTo]
   );
   const row = get("SELECT last_insert_rowid() as id");
   res.json({ id: row.id, success: true });
@@ -373,6 +450,11 @@ app.put("/api/users/me", auth, (req, res) => {
 
 app.get("/api/nearby-clinics", async (req, res) => {
   const { lng, lat } = req.query;
+  const numLng = Number(lng);
+  const numLat = Number(lat);
+  if (!lng || !lat || !Number.isFinite(numLng) || !Number.isFinite(numLat)
+    || numLng < -180 || numLng > 180 || numLat < -90 || numLat > 90)
+    return res.status(400).json({ error: "经纬度参数无效" });
   if (!AMAP_KEY) {
     return res.json({ fallback: true, pois: [
       { name: "北京心理危机研究与干预中心", address: "北京市西城区德外安康胡同5号", tel: "010-82951332" },
@@ -381,7 +463,7 @@ app.get("/api/nearby-clinics", async (req, res) => {
     ]});
   }
   try {
-    const url = `https://restapi.amap.com/v3/place/text?key=${AMAP_KEY}&keywords=心理咨询&location=${lng},${lat}&offset=5&output=json`;
+    const url = `https://restapi.amap.com/v3/place/text?key=${AMAP_KEY}&keywords=心理咨询&location=${numLng},${numLat}&offset=5&output=json`;
     const r = await fetch(url);
     const data = await r.json();
     const pois = (data.pois || []).map(poi => ({

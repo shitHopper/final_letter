@@ -1,7 +1,6 @@
 const initSqlJs = require("sql.js");
 const path = require("path");
 const fs = require("fs");
-const crypto = require("crypto");
 
 const DB_PATH = path.join(__dirname, "juebixin.db");
 
@@ -107,13 +106,15 @@ async function initDb() {
     db.run("ALTER TABLE users ADD COLUMN password TEXT DEFAULT NULL");
   } catch (e) { /* column already exists */ }
 
-  // Seed: set password for existing accounts that have none
-  const pwRows = db.exec("SELECT nickname FROM users WHERE password IS NULL");
+  // Migrate: add force_reset to users if missing
+  try {
+    db.run("ALTER TABLE users ADD COLUMN force_reset INTEGER DEFAULT 0");
+  } catch (e) { /* column already exists */ }
+
+  // Mark existing accounts without a password as needing reset
+  const pwRows = db.exec("SELECT id FROM users WHERE password IS NULL");
   if (pwRows.length > 0 && pwRows[0].values.length > 0) {
-    const salt = crypto.randomBytes(16).toString("hex");
-    const key = crypto.scryptSync("010013", salt, 64).toString("hex");
-    const hash = salt + ":" + key;
-    db.run("UPDATE users SET password = ? WHERE password IS NULL", [hash]);
+    db.run("UPDATE users SET force_reset = 1 WHERE password IS NULL");
   }
 
   // Seed demo user
