@@ -155,6 +155,12 @@ function verifyPassword(password, stored) {
   return derived === key;
 }
 
+
+
+// 托管前端文件夹，访问域名直接打开网页
+app.use(express.static(path.join(__dirname, '../frontend')));
+
+
 // ========== 认证模块 ==========
 
 app.post("/api/auth/register", authLimiter, (req, res) => {
