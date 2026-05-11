@@ -20,16 +20,16 @@ function run(query, params = []) {
 // ========== 邮件推送 ==========
 
 function createTransporter() {
-  const host = process.env.SMTP_HOST || "smtp.resend.com";
+  const host = process.env.SMTP_HOST || "smtpdm.aliyun.com";
   const port = Number(process.env.SMTP_PORT) || 465;
   const user = process.env.SMTP_USER || "";
-  const pass = process.env.SMTP_PASS || process.env.RESEND_API_KEY || "";
-  if (!user && !pass) return null;
+  const pass = process.env.SMTP_PASS || "";
+  if (!user || !pass) return null;
   return nodemailer.createTransport({ host, port, secure: port === 465, auth: { user, pass } });
 }
 
 async function sendEmail(to, subject, html) {
-  const from = process.env.MAIL_FROM || "绝笔信 <noreply@resend.dev>";
+  const from = process.env.MAIL_FROM || "绝笔信 <noreply@yourdomain.com>";
   const transporter = createTransporter();
   if (!transporter) {
     console.log(`[邮件-模拟] 收件人: ${to}, 主题: ${subject}`);
