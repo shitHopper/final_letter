@@ -298,6 +298,65 @@ body {
   border-color: var(--danger);
 }
 
+.countdown-card.push-phase {
+  border-color: var(--warning);
+  background: linear-gradient(135deg, #fff9f0, #fff);
+}
+
+.countdown-card.push-phase.overdue {
+  border-color: var(--danger);
+  background: linear-gradient(135deg, #fff0f0, #fff);
+}
+
+.countdown-card.alert-phase {
+  border-color: transparent;
+}
+
+.push-phase-hint {
+  margin-top: 12px;
+  padding: 10px 14px;
+  background: rgba(243, 156, 18, 0.1);
+  color: #92400e;
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.push-phase .countdown-time {
+  color: #e67e22;
+}
+
+.push-phase.overdue .countdown-time {
+  color: var(--danger);
+}
+
+.push-phase .countdown-label {
+  color: #92400e;
+}
+
+.push-phase.overdue .countdown-label {
+  color: var(--danger);
+}
+
+.push-phase .progress-fill {
+  background: linear-gradient(90deg, #f39c12, #e67e22);
+}
+
+.push-phase.overdue .progress-fill {
+  background: var(--danger);
+}
+
+.btn-push-checkin {
+  background: #e67e22;
+  color: #fff;
+  border-color: #e67e22;
+  font-weight: 600;
+}
+
+.btn-push-checkin:hover:not(:disabled) {
+  background: #d35400;
+}
+
 .countdown-label {
   font-size: 14px;
   color: var(--text-2);
@@ -1072,4 +1131,160 @@ body {
   padding: 12px;
   font-size: 16px;
   margin-top: 4px;
+}
+
+/* ===== Notify Modal ===== */
+.notify-contacts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 12px 0;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.notify-select-all {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  background: var(--primary-bg);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--primary);
+  font-weight: 500;
+}
+
+.notify-contact-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.notify-contact-item:hover {
+  background: var(--bg);
+}
+
+.notify-contact-name {
+  font-weight: 500;
+}
+
+.notify-contact-target {
+  color: var(--text-3);
+  font-size: 12px;
+  margin-left: auto;
+}
+
+.notify-message {
+  margin-top: 12px;
+}
+
+.notify-message label {
+  font-size: 13px;
+  color: var(--text-2);
+  display: block;
+  margin-bottom: 4px;
+}
+
+.notify-message textarea {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 14px;
+  font-family: inherit;
+  resize: vertical;
+}
+
+.notify-message textarea:focus {
+  outline: none;
+  border-color: var(--primary);
+}
+
+.notify-default-hint {
+  font-size: 12px;
+  color: var(--text-3);
+  margin-top: 4px;
+}
+
+/* ===== Contacts (Profile Page) ===== */
+.contacts-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.contacts-header h3 {
+  font-size: 16px;
+  color: var(--text-2);
+  margin: 0;
+}
+
+.contact-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 0;
+  border-top: 1px solid var(--border);
+  margin-top: 8px;
+}
+
+.contact-form input,
+.contact-form select {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 14px;
+  font-family: inherit;
+}
+
+.contact-form input:focus,
+.contact-form select:focus {
+  outline: none;
+  border-color: var(--primary);
+}
+
+.contact-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.contact-item {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.contact-item:last-child {
+  border-bottom: none;
+}
+
+.contact-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.contact-name {
+  font-weight: 500;
+  font-size: 15px;
+}
+
+.contact-target {
+  font-size: 13px;
+  color: var(--text-2);
+}
+
+.contact-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
 }

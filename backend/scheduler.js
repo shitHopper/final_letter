@@ -17,6 +17,11 @@ function run(query, params = []) {
   saveDb();
 }
 
+function get(query, params = []) {
+  const results = all(query, params);
+  return results[0] || null;
+}
+
 // ========== 邮件推送 ==========
 
 function createTransporter() {
@@ -45,6 +50,34 @@ async function sendEmail(to, subject, html) {
   }
 }
 
+// ========== 联系人通知 ==========
+
+async function notifyContacts(userId, subject, message) {
+  const user = get("SELECT * FROM users WHERE id = ?", [userId]);
+  if (!user) return;
+  const contacts = all("SELECT * FROM contacts WHERE user_id = ?", [userId]);
+  if (contacts.length === 0) {
+    console.log(`[通知] 用户${userId}没有紧急联系人，跳过通知`);
+    return;
+  }
+
+  for (const contact of contacts) {
+    if (contact.notify_method === 1) {
+      const html = `<div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:20px;">
+        <h2 style="color:#e74c3c;">来自「绝笔信」的紧急通知</h2>
+        <p><strong>${user.nickname}</strong> 的联系人收到以下消息：</p>
+        <div style="background:#fff3cd;border-radius:12px;padding:16px;margin:16px 0;">
+          <p style="white-space:pre-wrap;line-height:1.8;font-size:16px;">${message}</p>
+        </div>
+        <p style="color:#636e72;font-size:12px;">此消息由「绝笔信」应用自动发送</p>
+      </div>`;
+      await sendEmail(contact.notify_target, subject, html);
+    } else {
+      console.log(`[短信-模拟] 收信人: ${contact.notify_target}, 内容: ${message}`);
+    }
+  }
+}
+
 // ========== 社区公开 ==========
 
 function publishToCommunity(userId, letter) {
@@ -58,30 +91,47 @@ function publishToCommunity(userId, letter) {
 async function checkOverdueAndSend() {
   const now = Date.now();
 
-  // 找出所有超时用户
-  const overdueUsers = all(`
-    SELECT id, nickname, last_checkin_at, checkin_interval_days
+  // ===== 阶段1：预警期限超时 → 发送求救信息，进入推送期限 =====
+  const alertOverdueUsers = all(`
+    SELECT id, nickname, alert_started_at, alert_interval_days
     FROM users
-    WHERE last_checkin_at IS NOT NULL
+    WHERE status = 'alert' AND alert_started_at IS NOT NULL
   `).filter(u => {
-    const deadline = new Date(u.last_checkin_at).getTime() + u.checkin_interval_days * 86400000;
+    const deadline = new Date(u.alert_started_at).getTime() + u.alert_interval_days * 86400000;
     return now > deadline;
   });
 
-  if (overdueUsers.length === 0) return;
+  for (const user of alertOverdueUsers) {
+    console.log(`[调度] 用户"${user.nickname}"(id=${user.id})预警期限超时，发送求救信息`);
 
-  for (const user of overdueUsers) {
-    // 查找该用户未发送的遗书
+    await notifyContacts(user.id, `紧急：${user.nickname} 可能需要帮助`, "我可能遇上了麻烦，我可能失联了，请寻找我。");
+
+    run("UPDATE users SET status = 'push', push_started_at = ? WHERE id = ?", [new Date().toISOString(), user.id]);
+  }
+
+  // ===== 阶段2：推送期限超时 → 发送遗书 =====
+  const pushOverdueUsers = all(`
+    SELECT id, nickname, push_started_at, push_interval_days
+    FROM users
+    WHERE status = 'push' AND push_started_at IS NOT NULL
+  `).filter(u => {
+    const deadline = new Date(u.push_started_at).getTime() + u.push_interval_days * 86400000;
+    return now > deadline;
+  });
+
+  if (pushOverdueUsers.length === 0) return;
+
+  for (const user of pushOverdueUsers) {
     const letters = all("SELECT * FROM letters WHERE user_id = ? AND is_sent = 0", [user.id]);
     if (letters.length === 0) continue;
 
-    console.log(`[调度] 用户"${user.nickname}"(id=${user.id})已超时，发现${letters.length}封未发送遗书`);
+    console.log(`[调度] 用户"${user.nickname}"(id=${user.id})推送期限超时，发现${letters.length}封未发送遗书`);
 
     for (const letter of letters) {
       let sent = false;
 
       switch (letter.push_method) {
-        case 1: { // 电子邮件
+        case 1: {
           const html = `<div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:20px;">
             <h2 style="color:#6c5ce7;">来自「绝笔信」的一封信</h2>
             <p>用户 <strong>${user.nickname}</strong> 未能按时打卡，以下是其留下的信件：</p>
@@ -94,19 +144,17 @@ async function checkOverdueAndSend() {
           sent = await sendEmail(letter.push_target, `来自「绝笔信」的一封信：${letter.title}`, html);
           break;
         }
-        case 2: { // 手机短信
-          // 阿里云短信需企业认证，Demo 阶段仅打印日志
+        case 2: {
           console.log(`[短信-模拟] 收信人: ${letter.push_target}, 内容: ${letter.title} - ${letter.content.slice(0, 50)}...`);
           sent = true;
           break;
         }
-        case 3: { // 实体邮信
-          // 二期功能，Demo 阶段仅打印日志
+        case 3: {
           console.log(`[实体信-模拟] 收件地址: ${letter.push_target}, 标题: ${letter.title}`);
           sent = true;
           break;
         }
-        case 4: { // 公开到社区
+        case 4: {
           publishToCommunity(user.id, letter);
           sent = true;
           break;
@@ -127,13 +175,11 @@ function startScheduler(dbInstance, saveFn) {
   db = dbInstance;
   saveDb = saveFn;
 
-  // 每5分钟检查一次
   checkInterval = setInterval(checkOverdueAndSend, 5 * 60 * 1000);
 
-  // 启动时立即检查一次
   checkOverdueAndSend();
 
-  console.log("[调度器] 已启动，每5分钟检查超时用户并发送遗书");
+  console.log("[调度器] 已启动，每5分钟检查超时用户");
 }
 
 function stopScheduler() {

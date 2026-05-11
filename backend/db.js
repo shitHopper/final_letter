@@ -36,7 +36,12 @@ async function initDb() {
       signature TEXT DEFAULT '',
       checkin_interval_days INTEGER DEFAULT 3,
       last_checkin_at TEXT,
-      created_at TEXT DEFAULT (datetime('now'))
+      created_at TEXT DEFAULT (datetime('now')),
+      alert_interval_days INTEGER DEFAULT 3,
+      push_interval_days INTEGER DEFAULT 3,
+      status TEXT DEFAULT 'alert',
+      alert_started_at TEXT,
+      push_started_at TEXT
     )
   `);
   db.run(`
@@ -86,6 +91,18 @@ async function initDb() {
     )
   `);
 
+  db.run(`
+    CREATE TABLE IF NOT EXISTS contacts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      name TEXT NOT NULL,
+      notify_method INTEGER NOT NULL,
+      notify_target TEXT NOT NULL,
+      created_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    )
+  `);
+
   // Migrate: add image_url to posts if missing
   try {
     db.run("ALTER TABLE posts ADD COLUMN image_url TEXT DEFAULT ''");
@@ -116,6 +133,44 @@ async function initDb() {
     db.run("ALTER TABLE letters ADD COLUMN sent_at TEXT DEFAULT NULL");
   } catch (e) { /* column already exists */ }
 
+  // Migrate: add alert/push interval and status fields to users
+  try {
+    db.run("ALTER TABLE users ADD COLUMN alert_interval_days INTEGER DEFAULT 3");
+  } catch (e) { /* column already exists */ }
+  try {
+    db.run("ALTER TABLE users ADD COLUMN push_interval_days INTEGER DEFAULT 3");
+  } catch (e) { /* column already exists */ }
+  try {
+    db.run("ALTER TABLE users ADD COLUMN status TEXT DEFAULT 'alert'");
+  } catch (e) { /* column already exists */ }
+  try {
+    db.run("ALTER TABLE users ADD COLUMN alert_started_at TEXT");
+  } catch (e) { /* column already exists */ }
+  try {
+    db.run("ALTER TABLE users ADD COLUMN push_started_at TEXT");
+  } catch (e) { /* column already exists */ }
+
+  // 初始化：将 checkin_interval_days 复制到 alert_interval_days，alert_started_at 复制自 last_checkin_at
+  function queryAll(query, params = []) {
+    const stmt = db.prepare(query);
+    stmt.bind(params);
+    const results = [];
+    while (stmt.step()) results.push(stmt.getAsObject());
+    stmt.free();
+    return results;
+  }
+  const needInit = queryAll("SELECT id, checkin_interval_days, last_checkin_at FROM users WHERE alert_started_at IS NULL");
+  for (const u of needInit) {
+    const intervalDays = u.checkin_interval_days || 3;
+    const lastAt = u.last_checkin_at;
+    const now = Date.now();
+    const isOverdue = lastAt ? now > new Date(lastAt).getTime() + intervalDays * 86400000 : false;
+    db.run(
+      "UPDATE users SET alert_interval_days = ?, alert_started_at = ?, status = ? WHERE id = ?",
+      [intervalDays, lastAt || new Date().toISOString(), isOverdue ? 'push' : 'alert', u.id]
+    );
+  }
+
   // Mark existing accounts without a password as needing reset
   const pwRows = db.exec("SELECT id FROM users WHERE password IS NULL");
   if (pwRows.length > 0 && pwRows[0].values.length > 0) {
@@ -125,9 +180,10 @@ async function initDb() {
   // Seed demo user
   const rows = db.exec("SELECT COUNT(*) as c FROM users");
   if (rows[0].values[0][0] === 0) {
+    const now = new Date().toISOString();
     db.run(
-      "INSERT INTO users (nickname, signature, checkin_interval_days, last_checkin_at) VALUES (?, ?, ?, ?)",
-      ["小明", "好好生活", 3, new Date().toISOString()]
+      "INSERT INTO users (nickname, signature, checkin_interval_days, last_checkin_at, alert_interval_days, push_interval_days, status, alert_started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      ["小明", "好好生活", 3, now, 3, 3, 'alert', now]
     );
   }
 

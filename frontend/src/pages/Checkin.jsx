@@ -34,14 +34,122 @@ const WARM_QUOTES = [
   "太阳每天都会升起，为你。",
 ]
 
+const DEFAULT_MESSAGES = {
+  well: "我还安好，挂念着你，请你放心。",
+  back: "麻烦解决，我已回来，请你放心。",
+}
+
+function NotifyModal({ type, contacts, onSend, onSkip }) {
+  const [selectedIds, setSelectedIds] = useState(contacts.map(c => c.id))
+  const [customMsg, setCustomMsg] = useState('')
+  const [sending, setSending] = useState(false)
+
+  const toggleContact = (id) => {
+    setSelectedIds(prev =>
+      prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]
+    )
+  }
+
+  const toggleAll = () => {
+    setSelectedIds(prev =>
+      prev.length === contacts.length ? [] : contacts.map(c => c.id)
+    )
+  }
+
+  const handleSend = async () => {
+    if (selectedIds.length === 0) { onSkip(); return }
+    setSending(true)
+    await onSend({
+      type,
+      customMessage: customMsg.trim() || undefined,
+      contactIds: selectedIds,
+    })
+    setSending(false)
+  }
+
+  const isBack = type === 'back'
+
+  return (
+    <div className="modal-overlay" onClick={onSkip}>
+      <div className="modal-content" onClick={e => e.stopPropagation()}>
+        <h3>{isBack ? '已恢复预警期限' : '打卡成功'}</h3>
+        <p className="modal-hint">
+          {isBack
+            ? '你已安全回来，是否通知联系人？'
+            : '是否向联系人发送安好信息？'}
+        </p>
+
+        {contacts.length === 0 ? (
+          <p className="modal-hint" style={{ color: 'var(--text-3)' }}>
+            暂无紧急联系人，可在「个人」页面添加
+          </p>
+        ) : (
+          <>
+            <div className="notify-contacts">
+              <label className="notify-select-all" onClick={toggleAll}>
+                <input
+                  type="checkbox"
+                  checked={selectedIds.length === contacts.length}
+                  onChange={() => {}}
+                />
+                <span>全选</span>
+              </label>
+              {contacts.map(c => (
+                <label key={c.id} className="notify-contact-item">
+                  <input
+                    type="checkbox"
+                    checked={selectedIds.includes(c.id)}
+                    onChange={() => toggleContact(c.id)}
+                  />
+                  <span className="notify-contact-name">{c.name}</span>
+                  <span className="notify-contact-target">{c.notify_target}</span>
+                </label>
+              ))}
+            </div>
+
+            <div className="notify-message">
+              <label>消息内容</label>
+              <textarea
+                placeholder={DEFAULT_MESSAGES[type]}
+                value={customMsg}
+                onChange={e => setCustomMsg(e.target.value)}
+                rows={3}
+              />
+              {!customMsg && (
+                <p className="notify-default-hint">
+                  留空将发送默认消息：{DEFAULT_MESSAGES[type]}
+                </p>
+              )}
+            </div>
+          </>
+        )}
+
+        <div className="btn-row" style={{ marginTop: 16 }}>
+          <button
+            className="btn btn-primary"
+            onClick={handleSend}
+            disabled={sending || (contacts.length > 0 && selectedIds.length === 0)}
+          >
+            {sending ? '发送中...' : '发送通知'}
+          </button>
+          <button className="btn" onClick={onSkip}>跳过</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function CheckinPage({ userId }) {
   const [info, setInfo] = useState(null)
-  const [intervalDays, setIntervalDays] = useState(3)
+  const [alertDays, setAlertDays] = useState(3)
+  const [pushDays, setPushDays] = useState(3)
   const [checking, setChecking] = useState(false)
   const [msg, setMsg] = useState('')
   const [quote, setQuote] = useState('')
   const [clinics, setClinics] = useState([])
   const [loadingClinics, setLoadingClinics] = useState(false)
+  const [contacts, setContacts] = useState([])
+  const [notifyModal, setNotifyModal] = useState(null) // null | { type: 'well'|'back' }
   const timerRef = useRef(null)
   const quoteTimerRef = useRef(null)
 
@@ -49,7 +157,14 @@ export default function CheckinPage({ userId }) {
     const res = await apiFetch('/api/checkin')
     const data = await res.json()
     setInfo(data)
-    setIntervalDays(data.intervalDays)
+    setAlertDays(data.alertIntervalDays)
+    setPushDays(data.pushIntervalDays)
+  }
+
+  const fetchContacts = async () => {
+    const res = await apiFetch('/api/contacts')
+    const data = await res.json()
+    setContacts(data)
   }
 
   const tick = () => {
@@ -65,8 +180,9 @@ export default function CheckinPage({ userId }) {
     setQuote(WARM_QUOTES[idx])
   }, [])
 
+  useEffect(() => { pickQuote() }, [pickQuote])
+
   useEffect(() => {
-    pickQuote()
     const scheduleNext = () => {
       const delay = 15000 + Math.random() * 15000
       quoteTimerRef.current = setTimeout(() => {
@@ -78,7 +194,7 @@ export default function CheckinPage({ userId }) {
     return () => clearTimeout(quoteTimerRef.current)
   }, [pickQuote])
 
-  useEffect(() => { fetchInfo() }, [])
+  useEffect(() => { fetchInfo(); fetchContacts() }, [])
 
   useEffect(() => {
     if (info) {
@@ -87,9 +203,7 @@ export default function CheckinPage({ userId }) {
     }
   }, [info?.deadline])
 
-  useEffect(() => {
-    fetchNearbyClinics()
-  }, [])
+  useEffect(() => { fetchNearbyClinics() }, [])
 
   const fetchNearbyClinics = async () => {
     setLoadingClinics(true)
@@ -123,17 +237,31 @@ export default function CheckinPage({ userId }) {
     const res = await apiFetch('/api/checkin', { method: 'POST' })
     const data = await res.json()
     if (data.success) {
-      setMsg('打卡成功！')
       fetchInfo()
+      if (data.canNotify) {
+        setNotifyModal({ type: data.prevStatus === 'push' ? 'back' : 'well' })
+      } else {
+        setMsg('打卡成功！')
+        setTimeout(() => setMsg(''), 2000)
+      }
     }
     setChecking(false)
-    setTimeout(() => setMsg(''), 2000)
+  }
+
+  const handleNotify = async ({ type, customMessage, contactIds }) => {
+    await apiFetch('/api/checkin/notify', {
+      method: 'POST',
+      body: JSON.stringify({ type, customMessage, contactIds }),
+    })
+    setNotifyModal(null)
+    setMsg(type === 'back' ? '已通知联系人你回来了' : '已发送安好信息')
+    setTimeout(() => setMsg(''), 3000)
   }
 
   const updateInterval = async () => {
     const res = await apiFetch('/api/checkin/interval', {
       method: 'PUT',
-      body: JSON.stringify({ days: intervalDays }),
+      body: JSON.stringify({ alertDays, pushDays }),
     })
     const data = await res.json()
     if (data.success) {
@@ -157,21 +285,32 @@ export default function CheckinPage({ userId }) {
 
   if (!info) return <div className="loading">加载中...</div>
 
+  const isPush = info.status === 'push'
+  const currentIntervalDays = isPush ? info.pushIntervalDays : info.alertIntervalDays
   const pct = info.deadline
-    ? Math.min(100, (info.remainingMs / (info.intervalDays * 86400000)) * 100)
+    ? Math.min(100, (info.remainingMs / (currentIntervalDays * 86400000)) * 100)
     : 100
 
   return (
     <div className="page checkin-page">
-      <div className={`countdown-card ${info.overdue ? 'overdue' : ''}`}>
-        <div className="countdown-label">{info.overdue ? '已超时！' : '距离下次打卡'}</div>
+      <div className={`countdown-card ${isPush ? 'push-phase' : 'alert-phase'} ${info.overdue ? 'overdue' : ''}`}>
+        <div className="countdown-label">
+          {isPush
+            ? (info.overdue ? '推送期限已超时！' : '推送期限（宽限期）')
+            : (info.overdue ? '预警期限已超时！' : '预警期限')}
+        </div>
         <div className="countdown-time">{formatRemaining(info.remainingMs)}</div>
         <div className="progress-bar">
           <div className="progress-fill" style={{ width: `${pct}%` }} />
         </div>
-        {info.overdue && info.unsentLetterCount > 0 && (
+        {isPush && info.overdue && info.unsentLetterCount > 0 && (
           <div className="overdue-warning">
             您有 {info.unsentLetterCount} 封遗书等待发送，请尽快打卡！
+          </div>
+        )}
+        {isPush && !info.overdue && (
+          <div className="push-phase-hint">
+            您未按时打卡，联系人已收到求救信息。请在宽限期内打卡恢复。
           </div>
         )}
       </div>
@@ -182,11 +321,11 @@ export default function CheckinPage({ userId }) {
       </div>
 
       <button
-        className="btn btn-primary btn-lg"
+        className={`btn btn-lg ${isPush ? 'btn-push-checkin' : 'btn-primary'}`}
         onClick={doCheckin}
         disabled={checking}
       >
-        {checking ? '打卡中...' : '一键打卡'}
+        {checking ? '打卡中...' : (isPush ? '打卡恢复' : '一键打卡')}
       </button>
 
       {msg && <div className="msg">{msg}</div>}
@@ -229,19 +368,39 @@ export default function CheckinPage({ userId }) {
       </div>
 
       <div className="setting-card">
-        <label>打卡间隔（天）</label>
+        <label>预警期限（天）</label>
         <div className="interval-row">
           <input
             type="range"
             min={1}
             max={7}
-            value={intervalDays}
-            onChange={e => setIntervalDays(Number(e.target.value))}
+            value={alertDays}
+            onChange={e => setAlertDays(Number(e.target.value))}
           />
-          <span className="interval-val">{intervalDays} 天</span>
+          <span className="interval-val">{alertDays} 天</span>
+        </div>
+        <label>推送期限（天）</label>
+        <div className="interval-row">
+          <input
+            type="range"
+            min={1}
+            max={7}
+            value={pushDays}
+            onChange={e => setPushDays(Number(e.target.value))}
+          />
+          <span className="interval-val">{pushDays} 天</span>
         </div>
         <button className="btn btn-sm" onClick={updateInterval}>保存</button>
       </div>
+
+      {notifyModal && (
+        <NotifyModal
+          type={notifyModal.type}
+          contacts={contacts}
+          onSend={handleNotify}
+          onSkip={() => { setNotifyModal(null); setMsg('打卡成功！'); setTimeout(() => setMsg(''), 2000) }}
+        />
+      )}
     </div>
   )
 }

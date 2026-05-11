@@ -7,6 +7,7 @@ const path = require("path");
 const crypto = require("crypto");
 const jwt = require("jsonwebtoken");
 const rateLimit = require("express-rate-limit");
+const nodemailer = require("nodemailer");
 const { initDb } = require("./db");
 const { startScheduler } = require("./scheduler");
 
@@ -118,6 +119,34 @@ function get(query, params = []) {
   return results[0] || null;
 }
 
+// ========== 邮件发送 ==========
+
+function createTransporter() {
+  const host = process.env.SMTP_HOST || "smtpdm.aliyun.com";
+  const port = Number(process.env.SMTP_PORT) || 465;
+  const user = process.env.SMTP_USER || "";
+  const pass = process.env.SMTP_PASS || "";
+  if (!user || !pass) return null;
+  return nodemailer.createTransport({ host, port, secure: port === 465, auth: { user, pass } });
+}
+
+async function sendEmail(to, subject, html) {
+  const from = process.env.MAIL_FROM || "绝笔信 <noreply@yourdomain.com>";
+  const transporter = createTransporter();
+  if (!transporter) {
+    console.log(`[邮件-模拟] 收件人: ${to}, 主题: ${subject}`);
+    return true;
+  }
+  try {
+    await transporter.sendMail({ from, to, subject, html });
+    console.log(`[邮件-已发送] 收件人: ${to}, 主题: ${subject}`);
+    return true;
+  } catch (err) {
+    console.error(`[邮件-发送失败] 收件人: ${to}, 错误: ${err.message}`);
+    return false;
+  }
+}
+
 // ========== 安全工具：移除敏感字段 ==========
 
 function stripPassword(obj) {
@@ -173,8 +202,8 @@ app.post("/api/auth/register", authLimiter, (req, res) => {
   if (existing)
     return res.status(409).json({ error: "注册失败，请尝试其他昵称" });
   const hashed = hashPassword(password);
-  run("INSERT INTO users (nickname, password, signature, checkin_interval_days, last_checkin_at) VALUES (?, ?, '', 3, ?)",
-    [nickname.trim(), hashed, new Date().toISOString()]);
+  run("INSERT INTO users (nickname, password, signature, checkin_interval_days, last_checkin_at, alert_interval_days, push_interval_days, status, alert_started_at) VALUES (?, ?, '', 3, ?, 3, 3, 'alert', ?)",
+    [nickname.trim(), hashed, new Date().toISOString(), new Date().toISOString()]);
   const user = get("SELECT * FROM users WHERE nickname = ?", [nickname.trim()]);
   const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: "7d" });
   res.cookie("token", token, COOKIE_OPTIONS);
@@ -228,38 +257,108 @@ app.post("/api/auth/set-password", auth, (req, res) => {
 
 app.get("/api/checkin", auth, (req, res) => {
   const user = get("SELECT * FROM users WHERE id = ?", [req.user.id]);
-
-  const last = user.last_checkin_at ? new Date(user.last_checkin_at) : null;
-  const intervalMs = user.checkin_interval_days * 24 * 60 * 60 * 1000;
+  const status = user.status || 'alert';
+  const alertDays = user.alert_interval_days || 3;
+  const pushDays = user.push_interval_days || 3;
   const now = Date.now();
-  const deadline = last ? new Date(last.getTime() + intervalMs) : null;
-  const remaining = deadline ? Math.max(0, deadline - now) : 0;
-  const overdue = deadline ? now > deadline.getTime() : false;
 
-  // 查询是否有未发送的遗书
+  let deadline;
+  if (status === 'push') {
+    const pushStart = user.push_started_at ? new Date(user.push_started_at) : new Date();
+    deadline = new Date(pushStart.getTime() + pushDays * 86400000);
+  } else {
+    const alertStart = user.alert_started_at ? new Date(user.alert_started_at) : new Date();
+    deadline = new Date(alertStart.getTime() + alertDays * 86400000);
+  }
+  const remaining = Math.max(0, deadline.getTime() - now);
+  const overdue = now > deadline.getTime();
+
   const unsentLetters = all("SELECT id, title, push_method FROM letters WHERE user_id = ? AND is_sent = 0", [req.user.id]);
+  const contacts = all("SELECT id FROM contacts WHERE user_id = ?", [req.user.id]);
 
   res.json({
-    lastCheckin: user.last_checkin_at,
-    intervalDays: user.checkin_interval_days,
-    deadline: deadline?.toISOString(),
+    status,
+    alertIntervalDays: alertDays,
+    pushIntervalDays: pushDays,
+    deadline: deadline.toISOString(),
     remainingMs: remaining,
     overdue,
     unsentLetterCount: unsentLetters.length,
+    contactsCount: contacts.length,
   });
 });
 
 app.post("/api/checkin", auth, (req, res) => {
+  const user = get("SELECT * FROM users WHERE id = ?", [req.user.id]);
   const now = new Date().toISOString();
-  run("UPDATE users SET last_checkin_at = ? WHERE id = ?", [now, req.user.id]);
-  res.json({ success: true, lastCheckin: now });
+  const prevStatus = user.status || 'alert';
+
+  run("UPDATE users SET last_checkin_at = ?, alert_started_at = ?, status = 'alert' WHERE id = ?", [now, now, req.user.id]);
+
+  const contacts = all("SELECT id FROM contacts WHERE user_id = ?", [req.user.id]);
+
+  res.json({
+    success: true,
+    prevStatus,
+    status: 'alert',
+    canNotify: contacts.length > 0,
+  });
+});
+
+app.post("/api/checkin/notify", auth, async (req, res) => {
+  const { type, customMessage, contactIds } = req.body;
+  if (!type || !['well', 'back'].includes(type))
+    return res.status(400).json({ error: "无效的通知类型" });
+
+  const user = get("SELECT * FROM users WHERE id = ?", [req.user.id]);
+  let contacts;
+  if (contactIds && contactIds.length > 0) {
+    contacts = all("SELECT * FROM contacts WHERE user_id = ? AND id IN (" + contactIds.map(() => '?').join(',') + ")", [req.user.id, ...contactIds]);
+  } else {
+    contacts = all("SELECT * FROM contacts WHERE user_id = ?", [req.user.id]);
+  }
+
+  if (contacts.length === 0)
+    return res.status(400).json({ error: "没有可通知的联系人" });
+
+  const templates = {
+    well: "我还安好，挂念着你，请你放心。",
+    back: "麻烦解决，我已回来，请你放心。",
+  };
+  const subjects = {
+    well: `${user.nickname} 报平安`,
+    back: `${user.nickname} 已回来`,
+  };
+  const message = customMessage || templates[type];
+  const subject = subjects[type];
+
+  for (const contact of contacts) {
+    if (contact.notify_method === 1) {
+      const html = `<div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:20px;">
+        <h2 style="color:#6c5ce7;">来自「绝笔信」的通知</h2>
+        <p><strong>${user.nickname}</strong> 给你发来了一条消息：</p>
+        <div style="background:#f8f9fa;border-radius:12px;padding:16px;margin:16px 0;">
+          <p style="white-space:pre-wrap;line-height:1.8;">${message}</p>
+        </div>
+        <p style="color:#636e72;font-size:12px;">此消息由「绝笔信」应用发送</p>
+      </div>`;
+      await sendEmail(contact.notify_target, subject, html);
+    } else {
+      console.log(`[短信-模拟] 收信人: ${contact.notify_target}, 内容: ${message}`);
+    }
+  }
+
+  res.json({ success: true, notifiedCount: contacts.length });
 });
 
 app.put("/api/checkin/interval", auth, (req, res) => {
-  const { days } = req.body;
-  if (!days || days < 1 || days > 7) return res.status(400).json({ error: "间隔天数需在1-7之间" });
-  run("UPDATE users SET checkin_interval_days = ? WHERE id = ?", [days, req.user.id]);
-  res.json({ success: true, intervalDays: days });
+  const { alertDays, pushDays, days } = req.body;
+  const alert = alertDays || days;
+  const push = pushDays || days;
+  if (!alert || alert < 1 || alert > 7) return res.status(400).json({ error: "预警期限需在1-7天之间" });
+  if (!push || push < 1 || push > 7) return res.status(400).json({ error: "推送期限需在1-7天之间" });
+  run("UPDATE users SET alert_interval_days = ?, push_interval_days = ?, checkin_interval_days = ? WHERE id = ?", [alert, push, alert, req.user.id]);
+  res.json({ success: true, alertIntervalDays: alert, pushIntervalDays: push });
 });
 
 // ========== 写信模块 ==========
@@ -458,6 +557,54 @@ app.get("/api/users/me", auth, (req, res) => {
 app.put("/api/users/me", auth, (req, res) => {
   const { nickname, signature } = req.body;
   run("UPDATE users SET nickname = ?, signature = ? WHERE id = ?", [nickname, signature, req.user.id]);
+  res.json({ success: true });
+});
+
+// ========== 联系人模块 ==========
+
+app.get("/api/contacts", auth, (req, res) => {
+  const contacts = all("SELECT * FROM contacts WHERE user_id = ? ORDER BY created_at DESC", [req.user.id]);
+  res.json(contacts);
+});
+
+app.post("/api/contacts", auth, (req, res) => {
+  const { name, notifyMethod, notifyTarget } = req.body;
+  if (!name || !name.trim()) return res.status(400).json({ error: "请输入联系人称呼" });
+  const method = Number(notifyMethod);
+  if (!Number.isInteger(method) || method < 1 || method > 2)
+    return res.status(400).json({ error: "无效的通知方式" });
+  if (!notifyTarget || !notifyTarget.trim())
+    return res.status(400).json({ error: "请输入联系方式" });
+  run(
+    "INSERT INTO contacts (user_id, name, notify_method, notify_target) VALUES (?, ?, ?, ?)",
+    [req.user.id, name.trim(), method, notifyTarget.trim()]
+  );
+  const row = get("SELECT last_insert_rowid() as id");
+  res.json({ id: row.id, success: true });
+});
+
+app.put("/api/contacts/:id", auth, (req, res) => {
+  const { name, notifyMethod, notifyTarget } = req.body;
+  const contact = get("SELECT * FROM contacts WHERE id = ?", [req.params.id]);
+  if (!contact) return res.status(404).json({ error: "联系人不存在" });
+  if (contact.user_id !== req.user.id)
+    return res.status(403).json({ error: "无权修改他人联系人" });
+  const method = Number(notifyMethod);
+  if (!Number.isInteger(method) || method < 1 || method > 2)
+    return res.status(400).json({ error: "无效的通知方式" });
+  run(
+    "UPDATE contacts SET name = ?, notify_method = ?, notify_target = ? WHERE id = ?",
+    [name.trim(), method, notifyTarget.trim(), req.params.id]
+  );
+  res.json({ success: true });
+});
+
+app.delete("/api/contacts/:id", auth, (req, res) => {
+  const contact = get("SELECT * FROM contacts WHERE id = ?", [req.params.id]);
+  if (!contact) return res.status(404).json({ error: "联系人不存在" });
+  if (contact.user_id !== req.user.id)
+    return res.status(403).json({ error: "无权删除他人联系人" });
+  run("DELETE FROM contacts WHERE id = ?", [req.params.id]);
   res.json({ success: true });
 });
 
