@@ -497,9 +497,9 @@ initDb().then(({ db: _db, save }) => {
   db = _db;
   saveDb = save;
   startScheduler(db, saveDb);
-  const PORT = 3001;
-  app.listen(PORT, () => {
-    console.log(`绝笔信后端已启动: http://localhost:${PORT}`);
+  const port = process.env.PORT || 3000; // 优先用 Render 给的 PORT 环境变量
+  app.listen(port, '0.0.0.0', () => { // 监听 0.0.0.0 而不是 localhost
+    console.log(`Server running on port ${port}`);
   });
 });
 
