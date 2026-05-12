@@ -15,7 +15,7 @@ const app = express();
 app.set("trust proxy", 1);
 const CORS_ORIGINS = process.env.CORS_ORIGINS
   ? process.env.CORS_ORIGINS.split(",")
-  : ["http://localhost:5173", "http://localhost:4173"];
+  : ["http://localhost:5173", "http://localhost:4173", "https://juebixin.asia", "https://www.juebixin.asia"];
 app.use(cors({ origin: CORS_ORIGINS, credentials: true }));
 app.use(express.json());
 app.use(cookieParser());
@@ -67,6 +67,14 @@ const letterVerifyLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 20,
   message: { error: "验证请求过于频繁，请稍后再试" },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const passwordChangeLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  message: { error: "密码修改请求过于频繁，请稍后再试" },
   standardHeaders: true,
   legacyHeaders: false,
 });
@@ -438,13 +446,14 @@ app.delete("/api/letters/:id", auth, (req, res) => {
 
 app.get("/api/posts", auth, (req, res) => {
   const posts = all(
-    `SELECT p.id, p.user_id, p.content, p.image_url, p.likes, p.created_at, u.nickname
+    `SELECT p.id, p.user_id, p.content, p.image_url, p.likes, p.created_at, u.nickname, u.avatar_url,
+            (SELECT COUNT(*) FROM comments WHERE post_id = p.id) AS comment_count
      FROM posts p JOIN users u ON p.user_id = u.id ORDER BY p.created_at DESC`
   );
 
   const likedRows = all("SELECT post_id FROM post_likes WHERE user_id = ?", [req.user.id]);
   const likedSet = new Set(likedRows.map(r => r.post_id));
-  posts.forEach(p => { p.liked = likedSet.has(p.id); });
+  posts.forEach(p => { p.liked = likedSet.has(p.id); p.comment_count = p.comment_count || 0; });
 
   res.json(posts);
 });
@@ -492,7 +501,7 @@ app.post("/api/posts/:id/like", auth, (req, res) => {
 
 app.get("/api/posts/:id/comments", auth, (req, res) => {
   const comments = all(
-    `SELECT c.id, c.post_id, c.user_id, c.content, c.reply_to_id, c.created_at, u.nickname
+    `SELECT c.id, c.post_id, c.user_id, c.content, c.reply_to_id, c.created_at, u.nickname, u.avatar_url
      FROM comments c JOIN users u ON c.user_id = u.id WHERE c.post_id = ? ORDER BY c.created_at ASC`,
     [req.params.id]
   );
@@ -555,8 +564,47 @@ app.get("/api/users/me", auth, (req, res) => {
 });
 
 app.put("/api/users/me", auth, (req, res) => {
-  const { nickname, signature } = req.body;
-  run("UPDATE users SET nickname = ?, signature = ? WHERE id = ?", [nickname, signature, req.user.id]);
+  const { nickname, signature, avatarUrl, gender } = req.body;
+  const fields = [];
+  const values = [];
+  if (nickname !== undefined) { fields.push("nickname = ?"); values.push(nickname); }
+  if (signature !== undefined) { fields.push("signature = ?"); values.push(signature); }
+  if (avatarUrl !== undefined) {
+    if (avatarUrl && !validateImageUrl(avatarUrl))
+      return res.status(400).json({ error: "头像链接无效" });
+    fields.push("avatar_url = ?"); values.push(avatarUrl);
+  }
+  if (gender !== undefined) {
+    const validGenders = ["男", "女", "武装直升机", ""];
+    if (!validGenders.includes(gender))
+      return res.status(400).json({ error: "无效的性别选项" });
+    fields.push("gender = ?"); values.push(gender);
+  }
+  if (fields.length === 0)
+    return res.status(400).json({ error: "没有需要更新的字段" });
+  values.push(req.user.id);
+  run(`UPDATE users SET ${fields.join(", ")} WHERE id = ?`, values);
+  res.json({ success: true });
+});
+
+app.post("/api/users/me/avatar", auth, upload.single("avatar"), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "未上传文件" });
+  const avatarUrl = `/uploads/${req.file.filename}`;
+  run("UPDATE users SET avatar_url = ? WHERE id = ?", [avatarUrl, req.user.id]);
+  res.json({ success: true, avatarUrl });
+});
+
+app.post("/api/users/me/change-password", auth, passwordChangeLimiter, (req, res) => {
+  const { oldPassword, newPassword } = req.body;
+  if (!oldPassword || !newPassword)
+    return res.status(400).json({ error: "请输入旧密码和新密码" });
+  if (newPassword.length < 4)
+    return res.status(400).json({ error: "新密码至少4位" });
+  const user = get("SELECT password FROM users WHERE id = ?", [req.user.id]);
+  if (!user.password || !verifyPassword(oldPassword, user.password))
+    return res.status(403).json({ error: "旧密码错误" });
+  const hashed = hashPassword(newPassword);
+  run("UPDATE users SET password = ? WHERE id = ?", [hashed, req.user.id]);
   res.json({ success: true });
 });
 

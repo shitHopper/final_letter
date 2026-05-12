@@ -6,8 +6,8 @@ export default defineConfig({
   server: {
     allowedHosts: ['.trycloudflare.com'],
     proxy: {
-      '/api': 'http://localhost:3001',
-      '/uploads': 'http://localhost:3001',
+      '/api': 'http://localhost:3000',
+      '/uploads': 'http://localhost:3000',
       '/amap': {
         target: 'https://restapi.amap.com',
         changeOrigin: true,

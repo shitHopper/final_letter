@@ -121,6 +121,7 @@ export default function CommunityPage({ userId }) {
     const res = await apiFetch(`/api/posts/${postId}/comments`)
     const data = await res.json()
     setComments(prev => ({ ...prev, [postId]: data }))
+    fetchPosts()
   }
 
   const handleReply = (comment) => {
@@ -139,6 +140,7 @@ export default function CommunityPage({ userId }) {
     const res = await apiFetch(`/api/posts/${postId}/comments`)
     const data = await res.json()
     setComments(prev => ({ ...prev, [postId]: data }))
+    fetchPosts()
   }
 
   const buildCommentTree = (flatComments) => {
@@ -175,6 +177,11 @@ export default function CommunityPage({ userId }) {
   const renderComment = (comment, postId) => (
     <div key={comment.id} className="comment">
       <div className="comment-main">
+        {comment.avatar_url ? (
+          <img src={comment.avatar_url} alt="" className="comment-avatar" />
+        ) : (
+          <span className="comment-avatar-initial">{comment.nickname[0]}</span>
+        )}
         <strong className="comment-author">{comment.nickname}</strong>
         <span className="comment-text">{comment.content}</span>
         <span className="comment-time">{formatTime(comment.created_at)}</span>
@@ -187,6 +194,11 @@ export default function CommunityPage({ userId }) {
         <div className="replies">
           {comment.replies.map(r => (
             <div key={r.id} className="reply">
+              {r.avatar_url ? (
+                <img src={r.avatar_url} alt="" className="comment-avatar comment-avatar-sm" />
+              ) : (
+                <span className="comment-avatar-initial comment-avatar-initial-sm">{r.nickname[0]}</span>
+              )}
               <strong className="reply-author">{r.nickname}</strong>
               {r.replyToNickname && <span className="reply-to">@{r.replyToNickname} </span>}
               <span className="reply-text">{r.content}</span>
@@ -241,7 +253,14 @@ export default function CommunityPage({ userId }) {
         {posts.length === 0 && <div className="empty">社区还没有内容，来发第一条吧</div>}
         {posts.map(post => (
           <div key={post.id} className="card post-card">
-            <div className="post-author">{post.nickname}</div>
+            <div className="post-author">
+              {post.avatar_url ? (
+                <img src={post.avatar_url} alt="" className="post-author-avatar" />
+              ) : (
+                <span className="post-author-initial">{post.nickname[0]}</span>
+              )}
+              <span>{post.nickname}</span>
+            </div>
             {post.content && <p className="post-content">{post.content}</p>}
             {parseImageUrls(post.image_url).length > 0 && (
               <div className={`post-images post-images-${Math.min(parseImageUrls(post.image_url).length, 3)}`}>
@@ -260,7 +279,7 @@ export default function CommunityPage({ userId }) {
                 {post.liked ? '❤️' : '🤍'} {post.likes}
               </button>
               <button className="btn btn-ghost" onClick={() => fetchComments(post.id)}>
-                💬 评论
+                💬 {post.comment_count || 0}
               </button>
               {post.user_id === userId && (
                 <button className="btn btn-ghost" onClick={() => setConfirmDelete({ type: 'post', id: post.id })}>🗑️ 删除</button>

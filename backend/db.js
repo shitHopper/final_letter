@@ -150,6 +150,14 @@ async function initDb() {
     db.run("ALTER TABLE users ADD COLUMN push_started_at TEXT");
   } catch (e) { /* column already exists */ }
 
+  // Migrate: add avatar_url and gender to users
+  try {
+    db.run("ALTER TABLE users ADD COLUMN avatar_url TEXT DEFAULT ''");
+  } catch (e) { /* column already exists */ }
+  try {
+    db.run("ALTER TABLE users ADD COLUMN gender TEXT DEFAULT ''");
+  } catch (e) { /* column already exists */ }
+
   // 初始化：将 checkin_interval_days 复制到 alert_interval_days，alert_started_at 复制自 last_checkin_at
   function queryAll(query, params = []) {
     const stmt = db.prepare(query);

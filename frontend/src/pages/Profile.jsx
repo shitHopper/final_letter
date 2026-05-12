@@ -1,9 +1,16 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { apiFetch } from '../api'
 
 const NOTIFY_METHODS = [
   { value: 1, label: '邮件' },
   { value: 2, label: '短信' },
+]
+
+const GENDER_OPTIONS = [
+  { value: '', label: '未设置' },
+  { value: '男', label: '男' },
+  { value: '女', label: '女' },
+  { value: '武装直升机', label: '武装直升机' },
 ]
 
 function ContactForm({ initial, onSubmit, onCancel, submitLabel }) {
@@ -52,10 +59,22 @@ export default function ProfilePage({ onLogout }) {
   const [editing, setEditing] = useState(false)
   const [editNickname, setEditNickname] = useState('')
   const [editSignature, setEditSignature] = useState('')
+  const [editGender, setEditGender] = useState('')
   const [msg, setMsg] = useState('')
   const [contacts, setContacts] = useState([])
   const [showAddContact, setShowAddContact] = useState(false)
   const [editingContact, setEditingContact] = useState(null)
+
+  // Avatar upload
+  const [uploadingAvatar, setUploadingAvatar] = useState(false)
+  const avatarInputRef = useRef(null)
+
+  // Change password
+  const [showChangePassword, setShowChangePassword] = useState(false)
+  const [oldPassword, setOldPassword] = useState('')
+  const [newPassword, setNewPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const [passwordError, setPasswordError] = useState('')
 
   const parseUTC = (dateStr) => {
     const utcStr = dateStr.includes('T') ? dateStr : dateStr.replace(' ', 'T') + 'Z'
@@ -68,6 +87,7 @@ export default function ProfilePage({ onLogout }) {
     setUser(data)
     setEditNickname(data.nickname)
     setEditSignature(data.signature)
+    setEditGender(data.gender || '')
   }
 
   const fetchContacts = async () => {
@@ -78,13 +98,70 @@ export default function ProfilePage({ onLogout }) {
   useEffect(() => { fetchUser(); fetchContacts() }, [])
 
   const saveProfile = async () => {
-    await apiFetch('/api/users/me', {
+    const res = await apiFetch('/api/users/me', {
       method: 'PUT',
-      body: JSON.stringify({ nickname: editNickname, signature: editSignature }),
+      body: JSON.stringify({ nickname: editNickname, signature: editSignature, gender: editGender }),
     })
+    if (!res.ok) {
+      const data = await res.json()
+      setMsg(data.error || '保存失败')
+      setTimeout(() => setMsg(''), 2000)
+      return
+    }
     setEditing(false)
     fetchUser()
     setMsg('保存成功')
+    setTimeout(() => setMsg(''), 2000)
+  }
+
+  const handleAvatarSelect = async (e) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    setUploadingAvatar(true)
+    try {
+      const formData = new FormData()
+      formData.append('avatar', file)
+      const res = await apiFetch('/api/users/me/avatar', { method: 'POST', body: formData })
+      if (!res.ok) throw new Error('头像上传失败')
+      fetchUser()
+      setMsg('头像已更新')
+      setTimeout(() => setMsg(''), 2000)
+    } catch {
+      alert('头像上传失败，请重试')
+    } finally {
+      setUploadingAvatar(false)
+      if (avatarInputRef.current) avatarInputRef.current.value = ''
+    }
+  }
+
+  const handleChangePassword = async () => {
+    setPasswordError('')
+    if (!oldPassword || !newPassword) {
+      setPasswordError('请填写旧密码和新密码')
+      return
+    }
+    if (newPassword.length < 4) {
+      setPasswordError('新密码至少4位')
+      return
+    }
+    if (newPassword !== confirmPassword) {
+      setPasswordError('两次输入的新密码不一致')
+      return
+    }
+    const res = await apiFetch('/api/users/me/change-password', {
+      method: 'POST',
+      body: JSON.stringify({ oldPassword, newPassword }),
+    })
+    const data = await res.json()
+    if (!res.ok) {
+      setPasswordError(data.error || '修改失败')
+      return
+    }
+    setShowChangePassword(false)
+    setOldPassword('')
+    setNewPassword('')
+    setConfirmPassword('')
+    setMsg('密码修改成功')
     setTimeout(() => setMsg(''), 2000)
   }
 
@@ -130,7 +207,23 @@ export default function ProfilePage({ onLogout }) {
   return (
     <div className="page profile-page">
       <div className="card profile-card">
-        <div className="avatar">{user.nickname[0]}</div>
+        <div className="avatar-wrapper" onClick={() => !editing && avatarInputRef.current?.click()}>
+          {user.avatar_url ? (
+            <img src={user.avatar_url} alt="" className="avatar avatar-img" />
+          ) : (
+            <div className="avatar">{user.nickname[0]}</div>
+          )}
+          {!editing && (
+            <div className="avatar-edit-badge">{uploadingAvatar ? '...' : '📷'}</div>
+          )}
+        </div>
+        <input
+          ref={avatarInputRef}
+          type="file"
+          accept="image/*"
+          onChange={handleAvatarSelect}
+          style={{ display: 'none' }}
+        />
         {editing ? (
           <div className="profile-edit">
             <input
@@ -143,16 +236,61 @@ export default function ProfilePage({ onLogout }) {
               value={editSignature}
               onChange={e => setEditSignature(e.target.value)}
             />
+            <div className="form-row">
+              <label>性别</label>
+              <select value={editGender} onChange={e => setEditGender(e.target.value)}>
+                {GENDER_OPTIONS.map(g => (
+                  <option key={g.value} value={g.value}>{g.label}</option>
+                ))}
+              </select>
+            </div>
             <div className="btn-row">
               <button className="btn btn-primary" onClick={saveProfile}>保存</button>
-              <button className="btn" onClick={() => { setEditing(false); setEditNickname(user.nickname); setEditSignature(user.signature) }}>取消</button>
+              <button className="btn" onClick={() => { setEditing(false); setEditNickname(user.nickname); setEditSignature(user.signature); setEditGender(user.gender || '') }}>取消</button>
             </div>
           </div>
         ) : (
           <div className="profile-info">
             <h2>{user.nickname}</h2>
             <p className="signature">{user.signature || '暂无签名'}</p>
+            {user.gender && <p className="profile-gender">{user.gender}</p>}
             <button className="btn" onClick={() => setEditing(true)}>编辑资料</button>
+          </div>
+        )}
+      </div>
+
+      <div className="card">
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <h3 style={{ fontSize: 16, color: 'var(--text-2)', margin: 0 }}>修改密码</h3>
+          {!showChangePassword && (
+            <button className="btn btn-sm" onClick={() => setShowChangePassword(true)}>修改</button>
+          )}
+        </div>
+        {showChangePassword && (
+          <div className="password-form">
+            <input
+              type="password"
+              placeholder="旧密码"
+              value={oldPassword}
+              onChange={e => { setOldPassword(e.target.value); setPasswordError('') }}
+            />
+            <input
+              type="password"
+              placeholder="新密码（至少4位）"
+              value={newPassword}
+              onChange={e => { setNewPassword(e.target.value); setPasswordError('') }}
+            />
+            <input
+              type="password"
+              placeholder="确认新密码"
+              value={confirmPassword}
+              onChange={e => { setConfirmPassword(e.target.value); setPasswordError('') }}
+            />
+            {passwordError && <div className="modal-error">{passwordError}</div>}
+            <div className="btn-row">
+              <button className="btn btn-primary" onClick={handleChangePassword}>确认修改</button>
+              <button className="btn" onClick={() => { setShowChangePassword(false); setOldPassword(''); setNewPassword(''); setConfirmPassword(''); setPasswordError('') }}>取消</button>
+            </div>
           </div>
         )}
       </div>
