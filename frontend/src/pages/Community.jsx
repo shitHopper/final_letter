@@ -12,7 +12,27 @@ export default function CommunityPage({ userId }) {
   const [replyTo, setReplyTo] = useState(null)
   const [uploading, setUploading] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(null)
+  const [viewingUser, setViewingUser] = useState(null)
+  const [userCardPos, setUserCardPos] = useState({ x: 0, y: 0 })
   const fileInputRef = useRef(null)
+
+  const handleViewUser = async (userId, e) => {
+    e.stopPropagation()
+    const rect = e.currentTarget.getBoundingClientRect()
+    const cardWidth = 240
+    const cardHeight = 180
+    let x = rect.left
+    let y = rect.bottom + 6
+    if (x + cardWidth > window.innerWidth) x = window.innerWidth - cardWidth - 8
+    if (y + cardHeight > window.innerHeight) y = rect.top - cardHeight - 6
+    if (x < 8) x = 8
+    setUserCardPos({ x, y })
+    const res = await apiFetch(`/api/users/${userId}`)
+    if (res.ok) {
+      const data = await res.json()
+      setViewingUser(data)
+    }
+  }
 
   const fetchPosts = async () => {
     const res = await apiFetch('/api/posts')
@@ -178,11 +198,11 @@ export default function CommunityPage({ userId }) {
     <div key={comment.id} className="comment">
       <div className="comment-main">
         {comment.avatar_url ? (
-          <img src={comment.avatar_url} alt="" className="comment-avatar" />
+          <img src={comment.avatar_url} alt="" className="comment-avatar" onClick={(e) => handleViewUser(comment.user_id, e)} />
         ) : (
-          <span className="comment-avatar-initial">{comment.nickname[0]}</span>
+          <span className="comment-avatar-initial" onClick={(e) => handleViewUser(comment.user_id, e)}>{comment.nickname[0]}</span>
         )}
-        <strong className="comment-author">{comment.nickname}</strong>
+        <strong className="comment-author" onClick={(e) => handleViewUser(comment.user_id, e)}>{comment.nickname}</strong>
         <span className="comment-text">{comment.content}</span>
         <span className="comment-time">{formatTime(comment.created_at)}</span>
         <button className="btn btn-ghost reply-btn" onClick={() => handleReply(comment)}>回复</button>
@@ -195,11 +215,11 @@ export default function CommunityPage({ userId }) {
           {comment.replies.map(r => (
             <div key={r.id} className="reply">
               {r.avatar_url ? (
-                <img src={r.avatar_url} alt="" className="comment-avatar comment-avatar-sm" />
+                <img src={r.avatar_url} alt="" className="comment-avatar comment-avatar-sm" onClick={(e) => handleViewUser(r.user_id, e)} />
               ) : (
-                <span className="comment-avatar-initial comment-avatar-initial-sm">{r.nickname[0]}</span>
+                <span className="comment-avatar-initial comment-avatar-initial-sm" onClick={(e) => handleViewUser(r.user_id, e)}>{r.nickname[0]}</span>
               )}
-              <strong className="reply-author">{r.nickname}</strong>
+              <strong className="reply-author" onClick={(e) => handleViewUser(r.user_id, e)}>{r.nickname}</strong>
               {r.replyToNickname && <span className="reply-to">@{r.replyToNickname} </span>}
               <span className="reply-text">{r.content}</span>
               <span className="reply-time">{formatTime(r.created_at)}</span>
@@ -255,11 +275,11 @@ export default function CommunityPage({ userId }) {
           <div key={post.id} className="card post-card">
             <div className="post-author">
               {post.avatar_url ? (
-                <img src={post.avatar_url} alt="" className="post-author-avatar" />
+                <img src={post.avatar_url} alt="" className="post-author-avatar" onClick={(e) => handleViewUser(post.user_id, e)} />
               ) : (
-                <span className="post-author-initial">{post.nickname[0]}</span>
+                <span className="post-author-initial" onClick={(e) => handleViewUser(post.user_id, e)}>{post.nickname[0]}</span>
               )}
-              <span>{post.nickname}</span>
+              <span className="post-author-name" onClick={(e) => handleViewUser(post.user_id, e)}>{post.nickname}</span>
             </div>
             {post.content && <p className="post-content">{post.content}</p>}
             {parseImageUrls(post.image_url).length > 0 && (
@@ -311,6 +331,21 @@ export default function CommunityPage({ userId }) {
           </div>
         ))}
       </div>
+
+      {viewingUser && (
+        <div className="user-card-overlay" onClick={() => setViewingUser(null)}>
+          <div className="user-card" style={{ left: userCardPos.x, top: userCardPos.y }} onClick={e => e.stopPropagation()}>
+            {viewingUser.avatar_url ? (
+              <img src={viewingUser.avatar_url} alt="" className="user-card-avatar" />
+            ) : (
+              <div className="user-card-avatar-initial">{viewingUser.nickname[0]}</div>
+            )}
+            <div className="user-card-nickname">{viewingUser.nickname}</div>
+            {viewingUser.gender && <div className="user-card-gender">{viewingUser.gender}</div>}
+            {viewingUser.signature && <div className="user-card-signature">{viewingUser.signature}</div>}
+          </div>
+        </div>
+      )}
 
       {confirmDelete && (
         <div className="modal-overlay" onClick={() => setConfirmDelete(null)}>

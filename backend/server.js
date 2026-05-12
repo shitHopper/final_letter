@@ -563,6 +563,12 @@ app.get("/api/users/me", auth, (req, res) => {
   res.json(stripPassword(user));
 });
 
+app.get("/api/users/:id", auth, (req, res) => {
+  const user = get("SELECT id, nickname, avatar_url, gender, signature, created_at FROM users WHERE id = ?", [req.params.id]);
+  if (!user) return res.status(404).json({ error: "用户不存在" });
+  res.json(user);
+});
+
 app.put("/api/users/me", auth, (req, res) => {
   const { nickname, signature, avatarUrl, gender } = req.body;
   const fields = [];

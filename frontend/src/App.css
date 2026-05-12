@@ -900,6 +900,7 @@ body {
   border-radius: 50%;
   object-fit: cover;
   flex-shrink: 0;
+  cursor: pointer;
 }
 
 .comment-avatar-sm {
@@ -919,6 +920,7 @@ body {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
+  cursor: pointer;
 }
 
 .comment-avatar-initial-sm {
@@ -931,6 +933,7 @@ body {
   color: var(--primary);
   white-space: nowrap;
   font-size: 13px;
+  cursor: pointer;
 }
 
 .comment-text {
@@ -980,6 +983,7 @@ body {
   color: var(--primary);
   white-space: nowrap;
   font-size: 13px;
+  cursor: pointer;
 }
 
 .reply-text {
@@ -1121,6 +1125,7 @@ body {
   border-radius: 50%;
   object-fit: cover;
   flex-shrink: 0;
+  cursor: pointer;
 }
 
 .post-author-initial {
@@ -1135,6 +1140,7 @@ body {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
+  cursor: pointer;
 }
 
 .profile-info h2 {
@@ -1191,6 +1197,69 @@ body {
 
 .stat-row span:last-child {
   font-weight: 500;
+}
+
+/* User profile floating card */
+.user-card-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+}
+
+.user-card {
+  position: fixed;
+  z-index: 301;
+  background: var(--card-bg);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.15);
+  padding: 16px;
+  min-width: 200px;
+  max-width: 260px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.user-card-avatar {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+.user-card-avatar-initial {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--primary), var(--primary-light));
+  color: #fff;
+  font-size: 24px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.user-card-nickname {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.user-card-gender {
+  font-size: 13px;
+  color: var(--text-3);
+}
+
+.user-card-signature {
+  font-size: 13px;
+  color: var(--text-2);
+  text-align: center;
+  word-break: break-word;
+}
+
+.post-author-name {
+  cursor: pointer;
 }
 
 /* ===== Login Page ===== */
