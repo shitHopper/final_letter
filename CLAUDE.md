@@ -44,13 +44,13 @@ The app also includes emergency contacts (notified during alert→push transitio
 - `src/pages/` — Four page components matching the tabs:
   - `Checkin.jsx` — Two-phase countdown (alert/push), one-tap check-in, post-checkin notify modal for contacts, nearby clinics (Amap API), mental health hotlines, rotating warm quotes
   - `Letters.jsx` — CRUD for farewell letters with server-side password protection (scrypt hash) and push method selection
-  - `Community.jsx` — Social feed with image uploads (up to 9 per post), likes, threaded comments, delete with confirmation
-  - `Profile.jsx` — User profile editing (nickname, signature), emergency contacts management (CRUD), check-in stats display
+  - `Community.jsx` — Social feed with image uploads (up to 9 per post), likes, threaded comments, delete with confirmation, click user avatar/name to view profile card
+  - `Profile.jsx` — User profile editing (nickname, signature, avatar upload, gender), password change, emergency contacts management (CRUD), check-in stats display
 - `src/App.css` — Single global stylesheet with CSS custom properties (theming via `:root` variables)
-- Vite dev server proxies `/api` → `http://localhost:3001` and `/amap` → `https://restapi.amap.com`
+- Vite dev server proxies `/api` → `http://localhost:3000`, `/uploads` → `http://localhost:3000`, and `/amap` → `https://restapi.amap.com`
 
 ### Database Schema (SQLite via sql.js)
-- `users` — id, nickname, password (scrypt hash), signature, checkin_interval_days (1-7), last_checkin_at, alert_interval_days, push_interval_days, status ('alert'|'push'), alert_started_at, push_started_at, force_reset, created_at
+- `users` — id, nickname, password (scrypt hash), signature, avatar_url, gender, checkin_interval_days (1-7), last_checkin_at, alert_interval_days, push_interval_days, status ('alert'|'push'), alert_started_at, push_started_at, force_reset, created_at
 - `letters` — id, user_id, title, content, push_method (1-4), push_target, password (scrypt hash, optional), is_sent, sent_at, timestamps
 - `posts` — id, user_id, content, image_url (JSON array), likes, created_at
 - `comments` — id, post_id, user_id, content, reply_to_id (threaded), created_at
@@ -66,7 +66,7 @@ The app also includes emergency contacts (notified during alert→push transitio
 - **Password hashing**: Server-side scrypt with random 16-byte salt. Minimum password length: 4 characters.
 - **Force reset**: Users created before password requirement are flagged `force_reset = 1` and must set a password before using the app.
 - **Auth middleware**: All API endpoints (except register/login) require valid JWT via `auth` middleware.
-- **Rate limiting**: Register/login: 10 requests per 15 min; Letter password verification: 20 requests per 15 min.
+- **Rate limiting**: Register/login: 10 requests per 15 min; Letter password verification: 20 requests per 15 min; Password change: 5 requests per 15 min.
 - **Security headers**: CSP, X-Content-Type-Options, X-Frame-Options set on all responses.
 - **Image validation**: File extension whitelist (.jpg/.jpeg/.png/.gif/.webp), SVG blocked, MIME type check, 5MB limit.
 - **JWT_SECRET env var required**: Server refuses to start without it.
@@ -79,7 +79,7 @@ The app also includes emergency contacts (notified during alert→push transitio
 - `SMTP_PORT` — Default: `465`
 - `SMTP_USER` / `SMTP_PASS` — Aliyun SMTP credentials. If absent, email sending is simulated (console log).
 - `MAIL_FROM` — Default: `绝笔信 <noreply@yourdomain.com>`
-- `CORS_ORIGINS` — Comma-separated allowed origins. Default: `http://localhost:5173,http://localhost:4173`
+- `CORS_ORIGINS` — Comma-separated allowed origins. Default: `http://localhost:5173,http://localhost:4173,https://juebixin.asia,https://www.juebixin.asia`
 - `PORT` — Default: `3000`
 
 ## Scheduler (`scheduler.js`)
@@ -108,6 +108,60 @@ Start backend first, then frontend — Vite proxy handles API routing.
 
 **Production deployment**: Frontend is built to `frontend/dist/` and served by the backend as static files. Backend also serves `frontend/dist/index.html` as SPA fallback for all non-API routes. Supports Cloudflare tunnel for external access.
 
+## Production Deployment (Cloudflare Tunnel)
+
+域名：`juebixin.asia` / `www.juebixin.asia`，通过 Cloudflare Named Tunnel 内网穿刺部署。
+
+1. 构建前端：`cd frontend && npm run build`
+2. 启动后端：`cd backend && npm run dev`
+3. 启动隧道：`E:\cloudflared-windows-amd64.exe tunnel run juebixin`
+
+Tunnel 配置文件：`~/.cloudflared/config.yml`（ingress 规则指向 `http://localhost:3000`）
+
+## API Endpoints Summary
+
+### Auth
+- `POST /api/auth/register` — 注册
+- `POST /api/auth/login` — 登录
+- `POST /api/auth/logout` — 登出
+- `GET /api/auth/me` — 当前用户信息
+- `POST /api/auth/set-password` — 强制设置密码
+
+### Users
+- `GET /api/users/me` — 当前用户完整信息
+- `PUT /api/users/me` — 更新个人资料（nickname, signature, avatarUrl, gender）
+- `POST /api/users/me/avatar` — 上传头像
+- `POST /api/users/me/change-password` — 修改密码
+- `GET /api/users/:id` — 查看其他用户公开信息（nickname, avatar_url, gender, signature, created_at）
+
+### Letters
+- `GET /api/letters` — 列表
+- `POST /api/letters` — 创建
+- `GET /api/letters/:id` — 详情（需密码验证后）
+- `PUT /api/letters/:id` — 更新
+- `DELETE /api/letters/:id` — 删除
+- `POST /api/letters/:id/verify` — 验证信件密码
+
+### Posts (Community)
+- `GET /api/posts` — 列表（含 comment_count）
+- `POST /api/posts` — 发帖
+- `DELETE /api/posts/:id` — 删帖
+- `POST /api/posts/:id/like` — 点赞/取消
+- `GET /api/posts/:id/comments` — 评论列表
+- `POST /api/posts/:id/comments` — 发评论/回复
+- `DELETE /api/comments/:id` — 删评论
+
+### Contacts
+- `GET /api/contacts` — 列表
+- `POST /api/contacts` — 添加
+- `PUT /api/contacts/:id` — 编辑
+- `DELETE /api/contacts/:id` — 删除
+
+### Other
+- `POST /api/upload` — 图片上传
+- `POST /api/checkin` — 打卡
+- `GET /api/checkin/status` — 打卡状态
+
 ## Key Technical Details
 
 - **sql.js persistence**: Database lives in memory and is throttled-saved to `juebixin.db` (500ms debounce). Data loss possible if process crashes within the debounce window. `SIGINT`/`SIGTERM` handlers force-save.
@@ -116,4 +170,7 @@ Start backend first, then frontend — Vite proxy handles API routing.
 - **Contact notifications**: On check-in, users can optionally notify contacts with preset ("我还安好" / "我已回来") or custom messages. On alert→push transition, contacts are automatically notified.
 - **Amap integration**: Requires `AMAP_KEY` env var for nearby clinics. Falls back to hardcoded Beijing/Shanghai/Guangzhou clinics when key is missing or geolocation fails.
 - **Image uploads**: Stored as files in `backend/uploads/`, served as static assets at `/uploads/`. Post image URLs validated server-side (must start with `/uploads/`, extension whitelist) and stored as JSON string arrays in the `image_url` column.
+- **User profile cards in community**: Clicking avatar or name on posts/comments/replies shows a floating card with public profile info (nickname, avatar, gender, signature). Card is positioned near the clicked element. Implemented via `GET /api/users/:id` and `handleViewUser` in Community.jsx.
+- **Avatar upload**: Users can upload avatar images via `POST /api/users/me/avatar` (multipart form). Avatars displayed throughout community (posts, comments, replies) and profile page.
+- **Password change**: Authenticated users can change password via `POST /api/users/me/change-password` (requires old password verification, rate limited).
 - **Chinese-language codebase**: UI text, comments, and error messages are in Chinese. Maintain this convention.
