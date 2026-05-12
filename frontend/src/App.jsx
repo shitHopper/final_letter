@@ -3,7 +3,7 @@ import CheckinPage from './pages/Checkin'
 import LettersPage from './pages/Letters'
 import CommunityPage from './pages/Community'
 import ProfilePage from './pages/Profile'
-import { isLoggedIn, logout, apiFetch, setOnUnauthorized } from './api'
+import { logout, apiFetch, setOnUnauthorized } from './api'
 import './App.css'
 
 const tabs = [
@@ -82,6 +82,8 @@ function LoginPage({ onLogin }) {
     const data = await res.json()
     if (data.token) {
       onLogin({ id: data.user.id, nickname: data.user.nickname, forceReset: data.user.forceReset })
+    } else if (data.needSetPassword) {
+      setError('该账号需要设置密码后才能登录，请联系管理员')
     } else {
       setError(data.error || (isRegister ? '注册失败' : '登录失败'))
     }
@@ -149,7 +151,6 @@ function App() {
   }, [handleUnauthorized])
 
   useEffect(() => {
-    if (!isLoggedIn()) { setLoading(false); return }
     apiFetch('/api/auth/me').then(res => {
       if (res.ok) return res.json()
       return null

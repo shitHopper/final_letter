@@ -10,6 +10,7 @@ const rateLimit = require("express-rate-limit");
 const nodemailer = require("nodemailer");
 const { initDb } = require("./db");
 const { startScheduler } = require("./scheduler");
+const { createHelpers } = require("./db-helpers");
 
 const app = express();
 app.set("trust proxy", 1);
@@ -37,13 +38,19 @@ app.use((req, res, next) => {
   next();
 });
 
-const COOKIE_OPTIONS = {
-  httpOnly: true,
-  sameSite: "none",
-  secure: true,
-  maxAge: 7 * 24 * 60 * 60 * 1000,
-  path: "/",
-};
+// Cookie 安全策略：根据请求协议动态选择
+// HTTPS 环境（生产 Cloudflare）：sameSite=none + secure=true（支持跨域 cookie）
+// HTTP 环境（本地开发）：sameSite=lax + secure=false
+function getCookieOptions(req) {
+  const isSecure = req.secure;
+  return {
+    httpOnly: true,
+    sameSite: isSecure ? "none" : "lax",
+    secure: isSecure,
+    maxAge: 7 * 24 * 60 * 60 * 1000,
+    path: "/",
+  };
+}
 
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) {
@@ -107,24 +114,11 @@ const upload = multer({
 });
 
 let db, saveDb;
+let all, run, get, runTransaction;
 
-function all(query, params = []) {
-  const stmt = db.prepare(query);
-  stmt.bind(params);
-  const results = [];
-  while (stmt.step()) results.push(stmt.getAsObject());
-  stmt.free();
-  return results;
-}
-
-function run(query, params = []) {
-  db.run(query, params);
-  saveDb();
-}
-
-function get(query, params = []) {
-  const results = all(query, params);
-  return results[0] || null;
+function escapeHtml(str) {
+  if (typeof str !== 'string') return str;
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 // ========== 邮件发送 ==========
@@ -160,6 +154,7 @@ async function sendEmail(to, subject, html) {
 function stripPassword(obj) {
   if (!obj) return obj;
   const { password, ...rest } = obj;
+  rest.has_password = !!password;
   return rest;
 }
 
@@ -193,7 +188,35 @@ function verifyPassword(password, stored) {
   return derived === key;
 }
 
+// ========== 信件验证 token ==========
 
+const LETTER_VERIFY_TOKENS = new Map(); // letterId -> { expiresAt }
+const VERIFY_TOKEN_TTL = 5 * 60 * 1000; // 5分钟有效
+
+function issueVerifyToken(letterId) {
+  const token = crypto.randomBytes(32).toString("hex");
+  LETTER_VERIFY_TOKENS.set(letterId, { token, expiresAt: Date.now() + VERIFY_TOKEN_TTL });
+  return token;
+}
+
+function consumeVerifyToken(letterId, token) {
+  const entry = LETTER_VERIFY_TOKENS.get(letterId);
+  if (!entry) return false;
+  if (Date.now() > entry.expiresAt || entry.token !== token) {
+    LETTER_VERIFY_TOKENS.delete(letterId);
+    return false;
+  }
+  LETTER_VERIFY_TOKENS.delete(letterId);
+  return true;
+}
+
+// 定期清理过期 token
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, entry] of LETTER_VERIFY_TOKENS) {
+    if (now > entry.expiresAt) LETTER_VERIFY_TOKENS.delete(id);
+  }
+}, 60 * 1000);
 
 // 托管前端文件夹，访问域名直接打开网页
 app.use(express.static(path.join(__dirname, '../frontend/dist')));
@@ -208,13 +231,13 @@ app.post("/api/auth/register", authLimiter, (req, res) => {
     return res.status(400).json({ error: "密码至少4位" });
   const existing = get("SELECT * FROM users WHERE nickname = ?", [nickname.trim()]);
   if (existing)
-    return res.status(409).json({ error: "注册失败，请尝试其他昵称" });
+    return res.status(400).json({ error: "注册失败，请尝试其他昵称" });
   const hashed = hashPassword(password);
   run("INSERT INTO users (nickname, password, signature, checkin_interval_days, last_checkin_at, alert_interval_days, push_interval_days, status, alert_started_at) VALUES (?, ?, '', 3, ?, 3, 3, 'alert', ?)",
     [nickname.trim(), hashed, new Date().toISOString(), new Date().toISOString()]);
   const user = get("SELECT * FROM users WHERE nickname = ?", [nickname.trim()]);
   const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: "7d" });
-  res.cookie("token", token, COOKIE_OPTIONS);
+  res.cookie("token", token, getCookieOptions(req));
   res.json({ token, user: { id: user.id, nickname: user.nickname } });
 });
 
@@ -228,14 +251,12 @@ app.post("/api/auth/login", authLimiter, (req, res) => {
   if (!user)
     return res.status(401).json({ error: "昵称或密码错误" });
   if (!user.password) {
-    const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: "7d" });
-    res.cookie("token", token, COOKIE_OPTIONS);
-    return res.json({ token, user: { id: user.id, nickname: user.nickname, forceReset: true } });
+    return res.status(403).json({ error: "账号需要设置密码后才能登录", needSetPassword: true });
   }
   if (!verifyPassword(password, user.password))
     return res.status(401).json({ error: "昵称或密码错误" });
   const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: "7d" });
-  res.cookie("token", token, COOKIE_OPTIONS);
+  res.cookie("token", token, getCookieOptions(req));
   res.json({ token, user: { id: user.id, nickname: user.nickname, forceReset: !!user.force_reset } });
 });
 
@@ -248,7 +269,7 @@ app.get("/api/auth/me", auth, (req, res) => {
 });
 
 app.post("/api/auth/logout", (req, res) => {
-  res.clearCookie("token", { path: "/" });
+  res.clearCookie("token", getCookieOptions(req));
   res.json({ success: true });
 });
 
@@ -301,7 +322,8 @@ app.post("/api/checkin", auth, (req, res) => {
   const now = new Date().toISOString();
   const prevStatus = user.status || 'alert';
 
-  run("UPDATE users SET last_checkin_at = ?, alert_started_at = ?, status = 'alert' WHERE id = ?", [now, now, req.user.id]);
+  // 使用 WHERE 条件防止覆盖调度器已更新的状态
+  run("UPDATE users SET last_checkin_at = ?, alert_started_at = ?, push_started_at = NULL, status = 'alert' WHERE id = ? AND status IN ('alert', 'push')", [now, now, req.user.id]);
 
   const contacts = all("SELECT id FROM contacts WHERE user_id = ?", [req.user.id]);
 
@@ -344,9 +366,9 @@ app.post("/api/checkin/notify", auth, async (req, res) => {
     if (contact.notify_method === 1) {
       const html = `<div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:20px;">
         <h2 style="color:#6c5ce7;">来自「绝笔信」的通知</h2>
-        <p><strong>${user.nickname}</strong> 给你发来了一条消息：</p>
+        <p><strong>${escapeHtml(user.nickname)}</strong> 给你发来了一条消息：</p>
         <div style="background:#f8f9fa;border-radius:12px;padding:16px;margin:16px 0;">
-          <p style="white-space:pre-wrap;line-height:1.8;">${message}</p>
+          <p style="white-space:pre-wrap;line-height:1.8;">${escapeHtml(message)}</p>
         </div>
         <p style="color:#636e72;font-size:12px;">此消息由「绝笔信」应用发送</p>
       </div>`;
@@ -378,16 +400,17 @@ app.get("/api/letters", auth, (req, res) => {
 
 app.post("/api/letters", auth, (req, res) => {
   const { title, content, pushMethod, pushTarget, password } = req.body;
-  if (!title || !content || !pushMethod || !pushTarget)
+  if (!title || !content || !pushMethod)
     return res.status(400).json({ error: "缺少必填字段" });
   const method = Number(pushMethod);
   if (!Number.isInteger(method) || method < 1 || method > 4)
     return res.status(400).json({ error: "无效的推送方式" });
-  // 信件密码哈希后存入数据库
+  if (method !== 4 && !pushTarget)
+    return res.status(400).json({ error: "缺少推送目标" });
   const hashedLetterPw = password ? hashPassword(password) : null;
   run(
     "INSERT INTO letters (user_id, title, content, push_method, push_target, password) VALUES (?, ?, ?, ?, ?, ?)",
-    [req.user.id, title, content, method, pushTarget, hashedLetterPw]
+    [req.user.id, title, content, method, pushTarget || '', hashedLetterPw]
   );
   const row = get("SELECT last_insert_rowid() as id");
   res.json({ id: row.id, success: true });
@@ -417,12 +440,16 @@ app.post("/api/letters/:id/verify", auth, letterVerifyLimiter, (req, res) => {
   if (!letter) return res.status(404).json({ error: "信件不存在" });
   if (letter.user_id !== req.user.id)
     return res.status(403).json({ error: "无权查看他人信件" });
-  if (!letter.password) return res.json({ verified: true });
+  if (!letter.password) {
+    const token = issueVerifyToken(letter.id);
+    return res.json({ verified: true, accessToken: token });
+  }
   const { password } = req.body;
   if (!password) return res.status(400).json({ error: "请输入密码" });
   if (!verifyPassword(password, letter.password))
     return res.status(403).json({ error: "密码错误" });
-  res.json({ verified: true });
+  const token = issueVerifyToken(letter.id);
+  res.json({ verified: true, accessToken: token });
 });
 
 app.get("/api/letters/:id", auth, (req, res) => {
@@ -430,6 +457,11 @@ app.get("/api/letters/:id", auth, (req, res) => {
   if (!letter) return res.status(404).json({ error: "信件不存在" });
   if (letter.user_id !== req.user.id)
     return res.status(403).json({ error: "无权查看他人信件" });
+  if (letter.password) {
+    const accessToken = req.headers['x-letter-token'];
+    if (!accessToken || !consumeVerifyToken(letter.id, accessToken))
+      return res.status(403).json({ error: "请先验证信件密码" });
+  }
   res.json(stripPassword(letter));
 });
 
@@ -488,15 +520,17 @@ app.post("/api/posts/:id/like", auth, (req, res) => {
   if (!post) return res.status(404).json({ error: "帖子不存在" });
   const existing = get("SELECT * FROM post_likes WHERE post_id = ? AND user_id = ?", [req.params.id, req.user.id]);
 
-  if (existing) {
-    run("DELETE FROM post_likes WHERE post_id = ? AND user_id = ?", [req.params.id, req.user.id]);
-    run("UPDATE posts SET likes = likes - 1 WHERE id = ? AND likes > 0", [req.params.id]);
-    res.json({ success: true, liked: false });
-  } else {
-    run("INSERT INTO post_likes (post_id, user_id) VALUES (?, ?)", [req.params.id, req.user.id]);
-    run("UPDATE posts SET likes = likes + 1 WHERE id = ?", [req.params.id]);
-    res.json({ success: true, liked: true });
-  }
+  runTransaction(() => {
+    if (existing) {
+      db.run("DELETE FROM post_likes WHERE post_id = ? AND user_id = ?", [req.params.id, req.user.id]);
+      db.run("UPDATE posts SET likes = likes - 1 WHERE id = ? AND likes > 0", [req.params.id]);
+    } else {
+      db.run("INSERT INTO post_likes (post_id, user_id) VALUES (?, ?)", [req.params.id, req.user.id]);
+      db.run("UPDATE posts SET likes = likes + 1 WHERE id = ?", [req.params.id]);
+    }
+  });
+
+  res.json({ success: true, liked: !existing });
 });
 
 app.get("/api/posts/:id/comments", auth, (req, res) => {
@@ -532,9 +566,11 @@ app.delete("/api/posts/:id", auth, (req, res) => {
   if (!post) return res.status(404).json({ error: "帖子不存在" });
   if (post.user_id !== req.user.id)
     return res.status(403).json({ error: "无权删除他人帖子" });
-  run("DELETE FROM post_likes WHERE post_id = ?", [req.params.id]);
-  run("DELETE FROM comments WHERE post_id = ?", [req.params.id]);
-  run("DELETE FROM posts WHERE id = ?", [req.params.id]);
+  runTransaction(() => {
+    db.run("DELETE FROM post_likes WHERE post_id = ?", [req.params.id]);
+    db.run("DELETE FROM comments WHERE post_id = ?", [req.params.id]);
+    db.run("DELETE FROM posts WHERE id = ?", [req.params.id]);
+  });
   res.json({ success: true });
 });
 
@@ -543,8 +579,10 @@ app.delete("/api/comments/:id", auth, (req, res) => {
   if (!comment) return res.status(404).json({ error: "评论不存在" });
   if (comment.user_id !== req.user.id)
     return res.status(403).json({ error: "无权删除他人评论" });
-  run("UPDATE comments SET reply_to_id = NULL WHERE reply_to_id = ?", [req.params.id]);
-  run("DELETE FROM comments WHERE id = ?", [req.params.id]);
+  runTransaction(() => {
+    db.run("UPDATE comments SET reply_to_id = NULL WHERE reply_to_id = ?", [req.params.id]);
+    db.run("DELETE FROM comments WHERE id = ?", [req.params.id]);
+  });
   res.json({ success: true });
 });
 
@@ -713,9 +751,14 @@ app.get('*', (req, res) => {
 initDb().then(({ db: _db, save }) => {
   db = _db;
   saveDb = save;
+  const helpers = createHelpers(db, saveDb);
+  all = helpers.all;
+  run = helpers.run;
+  get = helpers.get;
+  runTransaction = helpers.runTransaction;
   startScheduler(db, saveDb);
-  const port = process.env.PORT || 3000; // 优先用 Render 给的 PORT 环境变量
-  app.listen(port, '0.0.0.0', () => { // 监听 0.0.0.0 而不是 localhost
+  const port = process.env.PORT || 3000;
+  app.listen(port, '0.0.0.0', () => {
     console.log(`Server running on port ${port}`);
   });
 });

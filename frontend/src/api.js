@@ -1,7 +1,3 @@
-export function isLoggedIn() {
-  return document.cookie.split(";").some(c => c.trim().startsWith("token="));
-}
-
 export async function logout() {
   await apiFetch("/api/auth/logout", { method: "POST" });
 }

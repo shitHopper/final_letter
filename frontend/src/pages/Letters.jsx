@@ -18,7 +18,7 @@ function Modal({ children, onClose }) {
   )
 }
 
-function PasswordModal({ onVerified, onClose, isSet }) {
+function PasswordModal({ onVerified, onClose, isSet, externalError }) {
   const [password, setPassword] = useState('')
   const [confirmPwd, setConfirmPwd] = useState('')
   const [error, setError] = useState('')
@@ -34,6 +34,8 @@ function PasswordModal({ onVerified, onClose, isSet }) {
     }
   }
 
+  const displayError = error || externalError
+
   return (
     <Modal onClose={onClose}>
       <h3>{isSet ? '输入密码' : '设置查看密码'}</h3>
@@ -43,7 +45,7 @@ function PasswordModal({ onVerified, onClose, isSet }) {
           type="password"
           placeholder={isSet ? '请输入密码' : '设置密码（至少4位）'}
           value={password}
-          onChange={e => { setPassword(e.target.value); setError('') }}
+          onChange={e => { setPassword(e.target.value); setError(''); onVerified(null) }}
           autoFocus
         />
         {!isSet && (
@@ -55,7 +57,7 @@ function PasswordModal({ onVerified, onClose, isSet }) {
             style={{ marginTop: 8 }}
           />
         )}
-        {error && <div className="modal-error">{error}</div>}
+        {displayError && <div className="modal-error">{displayError}</div>}
         <div className="btn-row" style={{ marginTop: 12 }}>
           <button className="btn btn-primary" type="submit">确认</button>
           <button className="btn" type="button" onClick={onClose}>取消</button>
@@ -87,6 +89,7 @@ export default function LettersPage({ userId }) {
   const [editingLetter, setEditingLetter] = useState(null)
   const [editForm, setEditForm] = useState({ title: '', content: '', pushMethod: 1, pushTarget: '', password: '' })
   const [pwdModalTarget, setPwdModalTarget] = useState(null)
+  const [pwdError, setPwdError] = useState('')
   const [deleteTarget, setDeleteTarget] = useState(null)
 
   const fetchLetters = async () => {
@@ -141,32 +144,40 @@ export default function LettersPage({ userId }) {
   }
 
   const handleViewLetter = async (letter) => {
-    // 无密码的信件直接打开
-    if (!letter.password) {
-      const res = await apiFetch(`/api/letters/${letter.id}`)
-      const data = await res.json()
-      setViewingLetter(data)
+    if (letter.has_password) {
+      setPwdError('')
+      setPwdModalTarget(letter)
       return
     }
-    // 有密码则弹窗
-    setPwdModalTarget(letter)
+    const verifyRes = await apiFetch(`/api/letters/${letter.id}/verify`, { method: 'POST' })
+    const verifyData = await verifyRes.json()
+    if (!verifyData.verified) return
+    const token = verifyData.accessToken
+    const detail = await apiFetch(`/api/letters/${letter.id}`, {
+      headers: token ? { 'x-letter-token': token } : {},
+    })
+    const data = await detail.json()
+    setViewingLetter(data)
   }
 
   const onPasswordSubmit = async (password) => {
+    if (password === null) { setPwdError(''); return }
     const res = await apiFetch(`/api/letters/${pwdModalTarget.id}/verify`, {
       method: 'POST',
       body: JSON.stringify({ password }),
     })
     const data = await res.json()
     if (data.verified) {
-      const detail = await apiFetch(`/api/letters/${pwdModalTarget.id}`)
+      const token = data.accessToken
+      const detail = await apiFetch(`/api/letters/${pwdModalTarget.id}`, {
+        headers: token ? { 'x-letter-token': token } : {},
+      })
       const letter = await detail.json()
       setViewingLetter(letter)
       setPwdModalTarget(null)
+      setPwdError('')
     } else {
-      // 密码错误由 modal 内处理——这里通过回传让 modal 显示错误
-      // 重新渲染 modal 并提示
-      alert(data.error || '密码错误')
+      setPwdError(data.error || '密码错误')
     }
   }
 
@@ -257,7 +268,7 @@ export default function LettersPage({ userId }) {
                 ) : (
                   <span className="badge badge-pending">待发送</span>
                 )}
-                {letter.password && <span className="badge badge-lock">🔒</span>}
+                {letter.has_password && <span className="badge badge-lock">🔒</span>}
               </div>
             </div>
             <p className="letter-preview">
@@ -280,9 +291,10 @@ export default function LettersPage({ userId }) {
 
       {pwdModalTarget && (
         <PasswordModal
-          isSet={!!pwdModalTarget.password}
+          isSet={!!pwdModalTarget.has_password}
           onVerified={onPasswordSubmit}
-          onClose={() => setPwdModalTarget(null)}
+          onClose={() => { setPwdModalTarget(null); setPwdError('') }}
+          externalError={pwdError}
         />
       )}
 

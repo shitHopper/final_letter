@@ -32,18 +32,19 @@ The app also includes emergency contacts (notified during alert→push transitio
 **No shared build system or workspace config.** Each directory has its own `package.json` and `node_modules`.
 
 ### Backend (`backend/`)
-- `server.js` — Single-file Express server containing all API routes and business logic
+- `server.js` — Express server with all API routes and business logic (DB helpers imported from `db-helpers.js`)
 - `db.js` — Database initialization, schema, migrations, and persistence (sql.js with throttled file save to `juebixin.db`)
+- `db-helpers.js` — Shared DB helper functions (`all`, `run`, `get`, `runTransaction`) used by both `server.js` and `scheduler.js`
 - `scheduler.js` — Background scheduler that runs every 5 minutes to check for overdue users and trigger notifications/letter delivery
 - `uploads/` — Multer-based image upload directory (5MB limit, images only, SVG blocked)
 - Port: **3000** (or `PORT` env var; listens on `0.0.0.0`)
 
 ### Frontend (`frontend/`)
 - `src/App.jsx` — Root component with login/register flow, force-reset password flow, bottom tab navigation (打卡/写信/社区/个人), ErrorBoundary
-- `src/api.js` — Shared API utility with cookie-based auth, 401 auto-logout handling
+- `src/api.js` — Shared API utility with cookie-based auth, 401 auto-logout handling (no client-side `isLoggedIn` check — auth state determined by server `/api/auth/me` response)
 - `src/pages/` — Four page components matching the tabs:
   - `Checkin.jsx` — Two-phase countdown (alert/push), one-tap check-in, post-checkin notify modal for contacts, nearby clinics (Amap API), mental health hotlines, rotating warm quotes
-  - `Letters.jsx` — CRUD for farewell letters with server-side password protection (scrypt hash) and push method selection
+  - `Letters.jsx` — CRUD for farewell letters with server-side password protection (scrypt hash), letter access token flow, and push method selection
   - `Community.jsx` — Social feed with image uploads (up to 9 per post), likes, threaded comments, delete with confirmation, click user avatar/name to view profile card
   - `Profile.jsx` — User profile editing (nickname, signature, avatar upload, gender), password change, emergency contacts management (CRUD), check-in stats display
 - `src/App.css` — Single global stylesheet with CSS custom properties (theming via `:root` variables)
@@ -62,14 +63,16 @@ The app also includes emergency contacts (notified during alert→push transitio
 
 ## Authentication & Security
 
-- **JWT-based auth**: Login/register issues JWT tokens stored in httpOnly cookies (`sameSite: 'none', secure: true`). Token expires in 7 days.
+- **JWT-based auth**: Login/register issues JWT tokens stored in httpOnly cookies. Cookie options are dynamic: HTTPS uses `sameSite: 'none', secure: true`; HTTP uses `sameSite: 'lax', secure: false` (via `getCookieOptions(req)`). Token expires in 7 days.
 - **Password hashing**: Server-side scrypt with random 16-byte salt. Minimum password length: 4 characters.
-- **Force reset**: Users created before password requirement are flagged `force_reset = 1` and must set a password before using the app.
+- **Force reset**: Users without a password can no longer log in directly — login returns `403` with `needSetPassword: true`. They must use `POST /api/auth/set-password` first.
 - **Auth middleware**: All API endpoints (except register/login) require valid JWT via `auth` middleware.
 - **Rate limiting**: Register/login: 10 requests per 15 min; Letter password verification: 20 requests per 15 min; Password change: 5 requests per 15 min.
 - **Security headers**: CSP, X-Content-Type-Options, X-Frame-Options set on all responses.
+- **XSS prevention**: HTML email templates use `escapeHtml()` for all user-generated content (nickname, message, letter title/content).
 - **Image validation**: File extension whitelist (.jpg/.jpeg/.png/.gif/.webp), SVG blocked, MIME type check, 5MB limit.
 - **JWT_SECRET env var required**: Server refuses to start without it.
+- **Letter access tokens**: After password verification, a short-lived token (5 min TTL) is issued and must be passed as `x-letter-token` header to `GET /api/letters/:id`. Prevents replay of verified access.
 
 ## Environment Variables
 
@@ -121,8 +124,8 @@ Tunnel 配置文件：`~/.cloudflared/config.yml`（ingress 规则指向 `http:/
 ## API Endpoints Summary
 
 ### Auth
-- `POST /api/auth/register` — 注册
-- `POST /api/auth/login` — 登录
+- `POST /api/auth/register` — 注册（重复昵称返回 400）
+- `POST /api/auth/login` — 登录（无密码账号返回 403 + `needSetPassword: true`）
 - `POST /api/auth/logout` — 登出
 - `GET /api/auth/me` — 当前用户信息
 - `POST /api/auth/set-password` — 强制设置密码
@@ -135,12 +138,12 @@ Tunnel 配置文件：`~/.cloudflared/config.yml`（ingress 规则指向 `http:/
 - `GET /api/users/:id` — 查看其他用户公开信息（nickname, avatar_url, gender, signature, created_at）
 
 ### Letters
-- `GET /api/letters` — 列表
-- `POST /api/letters` — 创建
-- `GET /api/letters/:id` — 详情（需密码验证后）
+- `GET /api/letters` — 列表（`has_password` 替代原 `password` 字段）
+- `POST /api/letters` — 创建（push_method=4 时 pushTarget 可为空）
+- `GET /api/letters/:id` — 详情（需 `x-letter-token` header，通过 verify 获取）
 - `PUT /api/letters/:id` — 更新
 - `DELETE /api/letters/:id` — 删除
-- `POST /api/letters/:id/verify` — 验证信件密码
+- `POST /api/letters/:id/verify` — 验证信件密码，返回 `accessToken`（5分钟有效）
 
 ### Posts (Community)
 - `GET /api/posts` — 列表（含 comment_count）
@@ -165,8 +168,9 @@ Tunnel 配置文件：`~/.cloudflared/config.yml`（ingress 规则指向 `http:/
 ## Key Technical Details
 
 - **sql.js persistence**: Database lives in memory and is throttled-saved to `juebixin.db` (500ms debounce). Data loss possible if process crashes within the debounce window. `SIGINT`/`SIGTERM` handlers force-save.
-- **Two-phase check-in**: `alert` → `push` → letter delivery. Check-in resets to `alert` phase and updates `alert_started_at`.
-- **Letter password protection**: Server-side scrypt hash stored in `letters.password` column. Verification via `POST /api/letters/:id/verify` with rate limiting.
+- **DB helpers**: Shared `all`, `run`, `get`, `runTransaction` functions extracted into `db-helpers.js`. `runTransaction` wraps operations in `BEGIN`/`COMMIT`/`ROLLBACK` for atomicity. Used by both `server.js` and `scheduler.js`.
+- **Two-phase check-in**: `alert` → `push` → letter delivery. Check-in resets to `alert` phase, clears `push_started_at`, and updates `alert_started_at`. UPDATE uses `WHERE status IN ('alert', 'push')` to prevent overwriting scheduler state. Scheduler similarly uses `WHERE status = 'alert'` guard.
+- **Letter password protection**: Server-side scrypt hash stored in `letters.password` column. Verification via `POST /api/letters/:id/verify` returns a short-lived `accessToken` (5 min). Subsequent `GET /api/letters/:id` requires `x-letter-token` header. `stripPassword()` also adds `has_password` boolean for frontend display.
 - **Contact notifications**: On check-in, users can optionally notify contacts with preset ("我还安好" / "我已回来") or custom messages. On alert→push transition, contacts are automatically notified.
 - **Amap integration**: Requires `AMAP_KEY` env var for nearby clinics. Falls back to hardcoded Beijing/Shanghai/Guangzhou clinics when key is missing or geolocation fails.
 - **Image uploads**: Stored as files in `backend/uploads/`, served as static assets at `/uploads/`. Post image URLs validated server-side (must start with `/uploads/`, extension whitelist) and stored as JSON string arrays in the `image_url` column.
