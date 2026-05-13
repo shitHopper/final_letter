@@ -3,7 +3,8 @@ const { createHelpers } = require("./db-helpers");
 
 let db, saveDb;
 let all, run, runCritical, get, runTransaction;
-let checkInterval;
+let checkTimer;
+let stopped = false;
 
 function escapeHtml(str) {
   if (typeof str !== 'string') return str;
@@ -117,6 +118,13 @@ async function checkOverdueAndSend() {
 
   for (const user of pushOverdueUsers) {
     try {
+      // 重新查询用户当前状态，防止竞态条件：用户可能在查询列表后已完成打卡
+      const current = get("SELECT status FROM users WHERE id = ?", [user.id]);
+      if (!current || current.status !== 'push') {
+        console.log(`[调度] 用户${user.id}状态已变更(${current?.status || '不存在'})，跳过发送`);
+        continue;
+      }
+
       const letters = all("SELECT * FROM letters WHERE user_id = ? AND is_sent = 0", [user.id]);
       if (letters.length === 0) continue;
 
@@ -181,18 +189,27 @@ function startScheduler(dbInstance, saveFn) {
   runCritical = helpers.runCritical;
   get = helpers.get;
   runTransaction = helpers.runTransaction;
+  stopped = false;
 
-  checkInterval = setInterval(checkOverdueAndSend, 5 * 60 * 1000);
+  // 使用 setTimeout 递归替代 setInterval，确保上次执行完成后才启动下一次
+  async function loop() {
+    if (stopped) return;
+    await checkOverdueAndSend();
+    if (stopped) return;
+    checkTimer = setTimeout(loop, 5 * 60 * 1000);
+  }
 
-  checkOverdueAndSend();
+  // 立即执行一次，然后每5分钟循环
+  loop();
 
   console.log("[调度器] 已启动，每5分钟检查超时用户");
 }
 
 function stopScheduler() {
-  if (checkInterval) {
-    clearInterval(checkInterval);
-    checkInterval = null;
+  stopped = true;
+  if (checkTimer) {
+    clearTimeout(checkTimer);
+    checkTimer = null;
   }
 }
 

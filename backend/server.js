@@ -21,6 +21,24 @@ app.use(cors({ origin: CORS_ORIGINS, credentials: true }));
 app.use(express.json());
 app.use(cookieParser());
 
+// CSRF 防护：HTTPS 环境下检查 Origin/Referer 请求头
+// 当 Cookie sameSite=none 时，浏览器会携带 Cookie 跨站请求，攻击者可伪造请求
+app.use((req, res, next) => {
+  if (["GET", "HEAD", "OPTIONS"].includes(req.method)) return next();
+  const origin = req.headers.origin || req.headers.referer;
+  if (!origin) return next(); // 无来源头的请求放行（如原生 app、curl）
+  try {
+    const originHost = new URL(origin).host;
+    const allowedHosts = CORS_ORIGINS.map(o => new URL(o).host);
+    if (!allowedHosts.includes(originHost)) {
+      return res.status(403).json({ error: "跨站请求被拒绝" });
+    }
+  } catch {
+    return res.status(403).json({ error: "无效的请求来源" });
+  }
+  next();
+});
+
 // CSP 响应头，缓解 XSS 攻击
 app.use((req, res, next) => {
   res.setHeader(
@@ -166,6 +184,11 @@ function auth(req, res, next) {
     return res.status(401).json({ error: "未登录" });
   try {
     const payload = jwt.verify(token, JWT_SECRET);
+    const user = get("SELECT token_version FROM users WHERE id = ?", [payload.userId]);
+    if (!user)
+      return res.status(401).json({ error: "用户不存在" });
+    if (payload.tokenVersion !== (user.token_version || 0))
+      return res.status(401).json({ error: "密码已修改，请重新登录" });
     req.user = { id: payload.userId };
     next();
   } catch {
@@ -215,8 +238,11 @@ function issueVerifyToken(letterId) {
 function consumeVerifyToken(letterId, token) {
   const entry = LETTER_VERIFY_TOKENS.get(letterId);
   if (!entry) return false;
-  if (Date.now() > entry.expiresAt || entry.token !== token) {
+  if (Date.now() > entry.expiresAt) {
     LETTER_VERIFY_TOKENS.delete(letterId);
+    return false;
+  }
+  if (entry.token !== token) {
     return false;
   }
   LETTER_VERIFY_TOKENS.delete(letterId);
@@ -358,12 +384,11 @@ app.post("/api/auth/register", authLimiter, async (req, res) => {
     return res.status(400).json({ error: "请输入有效的邮箱地址" });
   if (!nickname || !nickname.trim())
     return res.status(400).json({ error: "请输入昵称" });
+  if (nickname.trim().length > 50)
+    return res.status(400).json({ error: "昵称最多50个字符" });
   if (!password || password.length < 4)
     return res.status(400).json({ error: "密码至少4位" });
   const trimmedEmail = email.trim().toLowerCase();
-  const existing = get("SELECT * FROM users WHERE nickname = ?", [nickname.trim()]);
-  if (existing)
-    return res.status(400).json({ error: "注册失败，请尝试其他昵称" });
   const existingEmail = get("SELECT id FROM users WHERE email = ? AND email_verified = 1", [trimmedEmail]);
   if (existingEmail)
     return res.status(400).json({ error: "该邮箱已被注册" });
@@ -402,10 +427,17 @@ app.post("/api/auth/register/verify", authLimiter, (req, res) => {
 
   const hashed = hashPassword(password);
   const now = new Date().toISOString();
-  run("INSERT INTO users (nickname, password, email, email_verified, signature, checkin_interval_days, last_checkin_at, alert_interval_days, push_interval_days, status, alert_started_at) VALUES (?, ?, ?, 1, '', 3, ?, 3, 3, 'alert', ?)",
-    [nickname.trim(), hashed, trimmedEmail, now, now]);
+  try {
+    run("INSERT INTO users (nickname, password, email, email_verified, signature, checkin_interval_days, last_checkin_at, alert_interval_days, push_interval_days, status, alert_started_at) VALUES (?, ?, ?, 1, '', 3, ?, 3, 3, 'alert', ?)",
+      [nickname.trim(), hashed, trimmedEmail, now, now]);
+  } catch (e) {
+    if (e.message && e.message.includes('UNIQUE constraint')) {
+      return res.status(400).json({ error: "注册失败，请尝试其他昵称" });
+    }
+    throw e;
+  }
   const user = get("SELECT * FROM users WHERE email = ? AND email_verified = 1", [trimmedEmail]);
-  const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: "3d" });
+  const token = jwt.sign({ userId: user.id, tokenVersion: user.token_version || 0 }, JWT_SECRET, { expiresIn: "3d" });
   res.cookie("token", token, getCookieOptions(req));
   res.json({ token, user: { id: user.id, nickname: user.nickname } });
 });
@@ -429,7 +461,7 @@ app.post("/api/auth/login", authLimiter, (req, res) => {
   }
   if (!verifyPassword(password, user.password))
     return res.status(401).json({ error: "账号或密码错误" });
-  const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: "3d" });
+  const token = jwt.sign({ userId: user.id, tokenVersion: user.token_version || 0 }, JWT_SECRET, { expiresIn: "3d" });
   res.cookie("token", token, getCookieOptions(req));
   res.json({ token, user: { id: user.id, nickname: user.nickname, forceReset: !!user.force_reset, needBindEmail: !user.email } });
 });
@@ -475,7 +507,7 @@ app.post("/api/auth/set-password", auth, (req, res) => {
   if (!password || password.length < 4)
     return res.status(400).json({ error: "密码至少4位" });
   const hashed = hashPassword(password);
-  run("UPDATE users SET password = ?, force_reset = 0 WHERE id = ?", [hashed, req.user.id]);
+  run("UPDATE users SET password = ?, force_reset = 0, token_version = token_version + 1 WHERE id = ?", [hashed, req.user.id]);
   res.json({ success: true });
 });
 
@@ -521,7 +553,7 @@ app.post("/api/auth/reset-password", passwordChangeLimiter, (req, res) => {
     return res.status(400).json({ error: "该邮箱未注册或未验证" });
 
   const hashed = hashPassword(newPassword);
-  run("UPDATE users SET password = ?, force_reset = 0 WHERE id = ?", [hashed, user.id]);
+  run("UPDATE users SET password = ?, force_reset = 0, token_version = token_version + 1 WHERE id = ?", [hashed, user.id]);
   res.json({ success: true });
 });
 
@@ -591,6 +623,8 @@ app.post("/api/checkin/notify", auth, async (req, res) => {
   const { type, customMessage, contactIds } = req.body;
   if (!type || !['well', 'back'].includes(type))
     return res.status(400).json({ error: "无效的通知类型" });
+  if (customMessage && customMessage.length > 500)
+    return res.status(400).json({ error: "自定义消息最多500个字符" });
 
   const user = get("SELECT * FROM users WHERE id = ?", [req.user.id]);
   let contacts;
@@ -654,6 +688,10 @@ app.post("/api/letters", auth, (req, res) => {
   const { title, content, pushMethod, pushTarget, password } = req.body;
   if (!title || !content || !pushMethod)
     return res.status(400).json({ error: "缺少必填字段" });
+  if (title.length > 100)
+    return res.status(400).json({ error: "标题最多100个字符" });
+  if (content.length > 10000)
+    return res.status(400).json({ error: "信件内容最多10000个字符" });
   const method = Number(pushMethod);
   if (!Number.isInteger(method) || method < 1 || method > 4)
     return res.status(400).json({ error: "无效的推送方式" });
@@ -672,6 +710,10 @@ app.put("/api/letters/:id", auth, (req, res) => {
   const { title, content, pushMethod, pushTarget, password } = req.body;
   if (!title || !content)
     return res.status(400).json({ error: "缺少必填字段" });
+  if (title.length > 100)
+    return res.status(400).json({ error: "标题最多100个字符" });
+  if (content.length > 10000)
+    return res.status(400).json({ error: "信件内容最多10000个字符" });
   const letter = get("SELECT * FROM letters WHERE id = ?", [req.params.id]);
   if (!letter) return res.status(404).json({ error: "信件不存在" });
   if (letter.user_id !== req.user.id)
@@ -754,6 +796,8 @@ function validateImageUrl(url) {
 app.post("/api/posts", auth, (req, res) => {
   const { content, imageUrls } = req.body;
   if (!content) return res.status(400).json({ error: "缺少必填字段" });
+  if (content.length > 1000)
+    return res.status(400).json({ error: "帖子内容最多1000个字符" });
   const urls = Array.isArray(imageUrls) ? imageUrls : [];
   if (urls.length > 9) return res.status(400).json({ error: "最多上传9张图片" });
   for (const u of urls) {
@@ -797,6 +841,8 @@ app.get("/api/posts/:id/comments", auth, (req, res) => {
 app.post("/api/posts/:id/comments", auth, (req, res) => {
   const { content, replyToId } = req.body;
   if (!content) return res.status(400).json({ error: "缺少必填字段" });
+  if (content.length > 300)
+    return res.status(400).json({ error: "评论最多300个字符" });
   const post = get("SELECT id FROM posts WHERE id = ?", [req.params.id]);
   if (!post) return res.status(404).json({ error: "帖子不存在" });
   let replyTo = replyToId || null;
@@ -861,6 +907,10 @@ app.get("/api/users/:id", auth, (req, res) => {
 
 app.put("/api/users/me", auth, (req, res) => {
   const { nickname, signature, avatarUrl, gender } = req.body;
+  if (nickname !== undefined && nickname.length > 50)
+    return res.status(400).json({ error: "昵称最多50个字符" });
+  if (signature !== undefined && signature.length > 200)
+    return res.status(400).json({ error: "个性签名最多200个字符" });
   const fields = [];
   const values = [];
   if (nickname !== undefined) { fields.push("nickname = ?"); values.push(nickname); }
@@ -900,7 +950,7 @@ app.post("/api/users/me/change-password", auth, passwordChangeLimiter, (req, res
   if (!user.password || !verifyPassword(oldPassword, user.password))
     return res.status(403).json({ error: "旧密码错误" });
   const hashed = hashPassword(newPassword);
-  run("UPDATE users SET password = ? WHERE id = ?", [hashed, req.user.id]);
+  run("UPDATE users SET password = ?, token_version = token_version + 1 WHERE id = ?", [hashed, req.user.id]);
   res.json({ success: true });
 });
 
@@ -914,6 +964,8 @@ app.get("/api/contacts", auth, (req, res) => {
 app.post("/api/contacts", auth, (req, res) => {
   const { name, notifyMethod, notifyTarget } = req.body;
   if (!name || !name.trim()) return res.status(400).json({ error: "请输入联系人称呼" });
+  if (name.trim().length > 50) return res.status(400).json({ error: "称呼最多50个字符" });
+  if (notifyTarget && notifyTarget.trim().length > 200) return res.status(400).json({ error: "联系方式最多200个字符" });
   const method = Number(notifyMethod);
   if (!Number.isInteger(method) || method < 1 || method > 2)
     return res.status(400).json({ error: "无效的通知方式" });
@@ -929,6 +981,8 @@ app.post("/api/contacts", auth, (req, res) => {
 
 app.put("/api/contacts/:id", auth, (req, res) => {
   const { name, notifyMethod, notifyTarget } = req.body;
+  if (name && name.trim().length > 50) return res.status(400).json({ error: "称呼最多50个字符" });
+  if (notifyTarget && notifyTarget.trim().length > 200) return res.status(400).json({ error: "联系方式最多200个字符" });
   const contact = get("SELECT * FROM contacts WHERE id = ?", [req.params.id]);
   if (!contact) return res.status(404).json({ error: "联系人不存在" });
   if (contact.user_id !== req.user.id)

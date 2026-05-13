@@ -66,7 +66,7 @@
 - 双阶段倒计时实时显示（预警/推送阶段不同 UI 风格）
 - 推送期限 UI 更紧迫（橙/红色主题，超时警告）
 - 一键打卡
-- 打卡后弹出通知面板：可勾选联系人、编辑自定义消息、选择发送或跳过
+- 打卡后弹出通知面板：可勾选联系人、编辑自定义消息（最多 500 字）、选择发送或跳过
 - 预警/推送期限双滑块灵活设置
 - 附近心理咨询机构查询（高德地图 API）
 - 心理健康援助热线速查
@@ -75,6 +75,7 @@
 ### 2. 写信（Letters）
 
 - 遗书 CRUD（创建、查看、编辑、删除）
+- 标题最多 100 字，内容最多 10000 字
 - 四种推送方式：
   1. 电子邮件（阿里云邮件推送）
   2. 手机短信（预留接口）
@@ -86,28 +87,31 @@
 
 ### 3. 社区（Community）
 
-- 图文帖子发布（支持最多 9 张图片）
+- 图文帖子发布（最多 1000 字，最多 9 张图片）
 - 点赞/取消点赞
-- 嵌套评论（支持回复）
+- 嵌套评论（最多 300 字，支持回复 @被回复人）
 - 帖子/评论删除（带确认弹窗）
 - 点击头像/昵称查看用户公开信息卡片
 - 图片上传（前端压缩 + 服务端校验）
 
 ### 4. 个人（Profile）
 
-- 个人资料编辑（昵称、签名、性别）
+- 个人资料编辑（昵称 ≤50 字，签名 ≤200 字，性别）
 - 头像上传
 - 邮箱显示/绑定/更换（验证码验证）
-- 修改密码（需旧密码确认）
-- 紧急联系人管理（CRUD，支持邮件/短信通知方式）
+- 修改密码（需旧密码确认，修改后所有已登录设备强制下线）
+- 紧急联系人管理（CRUD，称呼 ≤50 字，联系方式 ≤200 字，支持邮件/短信通知方式）
 - 打卡统计展示
 
 ### 安全特性
 
-- JWT 认证（httpOnly Cookie，动态 SameSite 策略）
+- JWT 认证（httpOnly Cookie，含 tokenVersion，动态 SameSite 策略）
+- 密码修改/重置自动递增 token_version，使所有已有 JWT 失效
+- CSRF 防护：状态变更请求（POST/PUT/DELETE）校验 Origin/Referer 请求头
 - 服务端 scrypt 密码哈希（16 字节随机盐）
 - 邮箱验证码机制（6 位数字，5 分钟有效，最多 5 次尝试，60 秒发送间隔，每日 10 次上限）
 - 两步注册流程（先发验证码，再验证注册）
+- 全端点输入长度校验（防止恶意超长输入）
 - 内容安全策略（CSP）响应头
 - XSS 防护（HTML 邮件模板 escapeHtml）
 - 图片上传校验（扩展名白名单，SVG 拦截，MIME 类型检查，5MB 限制）
@@ -134,9 +138,9 @@
 │  │  验证码   │  Token   │  评论     │  通知         │  │
 │  └──────────┴──────────┴──────────┴──────────────┘  │
 │  ┌──────────────────────────────────────────────┐   │
-│  │  Scheduler (每 5 分钟)                         │   │
+│  │  Scheduler (每 5 分钟，递归 setTimeout)        │   │
 │  │  · 检查预警超时 → 通知联系人 → 切换 push 状态    │   │
-│  │  · 检查推送超时 → 发送遗书                      │   │
+│  │  · 检查推送超时 → 重查状态 → 发送遗书           │   │
 │  │  · 清理过期验证码                               │   │
 │  └──────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────┐   │
@@ -154,7 +158,7 @@
 | 前端 | React 19 + Vite 8 | SPA with Tab state routing |
 | 后端 | Express.js 4 | RESTful API |
 | 数据库 | sql.js (SQLite) | 内存数据库 + 文件持久化 |
-| 认证 | JWT + httpOnly Cookie | scrypt 密码哈希 |
+| 认证 | JWT + httpOnly Cookie | scrypt 密码哈希 + token_version |
 | 邮件 | nodemailer + 阿里云 SMTP | Resend 备选 |
 | 存储 | 服务端文件系统 | Multer 图片上传 |
 
@@ -196,7 +200,6 @@ jue_bi_xin_project/
 │   │       └── Profile.jsx   # 个人页（资料、头像、邮箱、密码、联系人）
 │   ├── package.json
 │   └── vite.config.js
-├── docs/                       # 设计与计划文档
 ├── CLAUDE.md                   # Claude Code 开发指南
 ├── REQUIREMENTS.md             # 产品需求文档
 ├── TECH_COMPARISON.md          # 技术方案对比
@@ -324,8 +327,8 @@ npm start
 | GET | `/api/users/me` | 完整个人信息 | JWT |
 | PUT | `/api/users/me` | 更新个人资料 | JWT |
 | POST | `/api/users/me/avatar` | 上传头像 | JWT |
-| POST | `/api/users/me/change-password` | 修改密码 | JWT |
-| GET | `/api/users/:id` | 查看其他用户公开信息 | - |
+| POST | `/api/users/me/change-password` | 修改密码（旧密码确认，token_version+1） | JWT |
+| GET | `/api/users/:id` | 查看其他用户公开信息 | JWT |
 
 ### 信件 (`/api/letters`)
 
@@ -367,7 +370,7 @@ npm start
 
 ### 生产环境（Cloudflare Tunnel 内网穿刺）
 
-内网穿刺允许没有公网 IP 的电脑将服务暴露到公网。本项目通过 Cloudflare Named Tunnel 实现，启动后可通过自定义域名访问。
+内网穿刺允许没有公网 IP 的电脑将服务暴露到公网。本项目通过 Cloudflare Named Tunnel 实现，启动后可通过 `juebixin.asia` / `www.juebixin.asia` 访问。
 
 #### 前提条件
 
@@ -418,6 +421,7 @@ Tunnel 配置文件的 ingress 规则指向 `http://localhost:3000`。
 
 - 后端设置 `trust proxy` 以支持 Cloudflare 反向代理
 - Cookie 策略自动检测协议：HTTPS 环境使用 `sameSite=none; secure=true`，HTTP 环境使用 `sameSite=lax; secure=false`
+- CSRF 防护：状态变更请求校验 Origin/Referer 请求头
 - CSP（内容安全策略）响应头防护
 
 ---
@@ -428,7 +432,6 @@ Tunnel 配置文件的 ingress 规则指向 `http://localhost:3000`。
 - [技术方案对比](./TECH_COMPARISON.md) — Flutter + NestJS vs 其他方案
 - [产品分析](./PRODUCT_ANALYSIS.md) — 竞品分析与定位
 - [CLAUDE.md](./CLAUDE.md) — 开发者快速指南（AI 辅助开发用）
-- [docs/](./docs/) — 功能设计文档与实现计划
 
 ---
 

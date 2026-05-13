@@ -171,6 +171,11 @@ async function initDb() {
     db.run("ALTER TABLE users ADD COLUMN email_verified INTEGER DEFAULT 0");
   } catch (e) { /* column already exists */ }
 
+  // Migrate: add token_version to users for JWT invalidation on password change
+  try {
+    db.run("ALTER TABLE users ADD COLUMN token_version INTEGER DEFAULT 0");
+  } catch (e) { /* column already exists */ }
+
   // Email verification codes table
   db.run(`
     CREATE TABLE IF NOT EXISTS email_verification_codes (
@@ -188,6 +193,11 @@ async function initDb() {
   // Unique index on email (NULL values excluded)
   try {
     db.run("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE email IS NOT NULL");
+  } catch (e) { /* index already exists */ }
+
+  // Unique index on nickname
+  try {
+    db.run("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_nickname ON users(nickname)");
   } catch (e) { /* index already exists */ }
 
   // 初始化：将 checkin_interval_days 复制到 alert_interval_days，alert_started_at 复制自 last_checkin_at

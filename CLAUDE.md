@@ -15,13 +15,7 @@ The app also includes emergency contacts (notified during alert→push transitio
 
 **当前为 Demo 原型阶段**，使用 SQLite + React + Vite 快速验证功能。
 
-**正式落地技术选型**（方案A：快速启动型）：
-- 前端：Flutter
-- 后端：NestJS + PostgreSQL
-- 邮件推送：Resend / 阿里云邮件推送
-- 短信推送：阿里云短信
-- 实体邮信：二期实现，先预留接口
-- 部署：Docker + 云服务器（阿里云/腾讯云）
+**正式落地技术选型（方案A）**: Flutter (前端) + NestJS + PostgreSQL (后端) + Resend/阿里云邮件推送 + 阿里云短信 + Docker 部署。实体邮信二期实现。
 
 ## Architecture
 
@@ -51,7 +45,7 @@ The app also includes emergency contacts (notified during alert→push transitio
 - Vite dev server proxies `/api` → `http://localhost:3000`, `/uploads` → `http://localhost:3000`, and `/amap` → `https://restapi.amap.com`
 
 ### Database Schema (SQLite via sql.js)
-- `users` — id, nickname, password (scrypt hash), email, email_verified (0/1), signature, avatar_url, gender, checkin_interval_days (1-7), last_checkin_at, alert_interval_days, push_interval_days, status ('alert'|'push'), alert_started_at, push_started_at, force_reset, created_at
+- `users` — id, nickname (unique index), password (scrypt hash), email, email_verified (0/1), signature, avatar_url, gender, checkin_interval_days (1-7), last_checkin_at, alert_interval_days, push_interval_days, status ('alert'|'push'), alert_started_at, push_started_at, force_reset, token_version (INTEGER DEFAULT 0, bumped on password change to invalidate JWTs), created_at
 - `letters` — id, user_id, title, content, push_method (1-4), push_target, password (scrypt hash, optional), is_sent, sent_at, timestamps
 - `posts` — id, user_id, content, image_url (JSON array), likes, created_at
 - `comments` — id, post_id, user_id, content, reply_to_id (threaded), created_at
@@ -64,14 +58,17 @@ The app also includes emergency contacts (notified during alert→push transitio
 
 ## Authentication & Security
 
-- **JWT-based auth**: Login/register issues JWT tokens stored in httpOnly cookies. Cookie options are dynamic: HTTPS uses `sameSite: 'none', secure: true`; HTTP uses `sameSite: 'lax', secure: false` (via `getCookieOptions(req)`). Token expires in 7 days.
+- **JWT-based auth**: Login/register issues JWT tokens stored in httpOnly cookies. Token payload includes `tokenVersion` for invalidation. Cookie options are dynamic: HTTPS uses `sameSite: 'none', secure: true`; HTTP uses `sameSite: 'lax', secure: false` (via `getCookieOptions(req)`). Token expires in 7 days (3 days for register).
+- **token_version invalidation**: Password change/reset bumps `users.token_version`. Auth middleware compares JWT `tokenVersion` against DB — mismatch forces re-login. This invalidates all existing tokens for that user.
+- **CSRF protection**: Middleware on state-changing requests (POST/PUT/DELETE) validates Origin/Referer header against allowed CORS origins. GET/HEAD/OPTIONS and requests without origin headers (native apps, curl) are exempt.
 - **Password hashing**: Server-side scrypt with random 16-byte salt. Minimum password length: 4 characters.
+- **Input validation**: All user input has character limits enforced server-side: nickname ≤50, signature ≤200, letter title ≤100, letter content ≤10000, post content ≤1000, comment ≤300, check-in notify custom message ≤500, contact name ≤50, contact target ≤200.
 - **Force reset**: Users without a password can no longer log in directly — login returns `403` with `needSetPassword: true`. They must use `POST /api/auth/set-password` first.
 - **Email binding**: Existing users without an email are redirected to a bind-email page after login (similar to force-reset flow). `GET /api/auth/me` returns `needBindEmail: true` when email is NULL.
 - **Email verification codes**: 6-digit code, 5-minute expiry, max 5 failed attempts per code. Sending rate-limited: 60s interval, 10/day per email.
-- **Registration**: Two-step — step 1 sends verification code to email, step 2 submits email + code + nickname + password. Email is marked verified upon successful registration.
+- **Registration**: Two-step — step 1 sends verification code to email, step 2 submits email + code + nickname + password. Nickname uniqueness enforced at DB level (unique index), duplicates caught as 400. Email is marked verified upon successful registration.
 - **Login**: Accepts `account` parameter (nickname or email). Email login requires `email_verified = 1`.
-- **Auth middleware**: All API endpoints (except register/login/send-code) require valid JWT via `auth` middleware.
+- **Auth middleware**: All API endpoints (except register/login/send-code) require valid JWT via `auth` middleware. Middleware queries DB for current `token_version` on each request.
 - **Rate limiting**: Register/login/send-code: 10 requests per 15 min; Letter password verification: 20 requests per 15 min; Password change/reset: 5 requests per 15 min.
 - **Security headers**: CSP, X-Content-Type-Options, X-Frame-Options set on all responses.
 - **XSS prevention**: HTML email templates use `escapeHtml()` for all user-generated content (nickname, message, letter title/content).
@@ -92,30 +89,29 @@ The app also includes emergency contacts (notified during alert→push transitio
 
 ## Scheduler (`scheduler.js`)
 
-Runs every 5 minutes via `setInterval`:
-1. **Phase 1 — Alert overdue**: Users in `alert` status whose `alert_started_at + alert_interval_days` has passed → notify all emergency contacts (求救信息), set status to `push`, record `push_started_at`. Status update uses `runTransaction` for race-condition protection (verifies status still `alert` before update, checks `getRowsModified()` to detect lost races).
-2. **Phase 2 — Push overdue**: Users in `push` status whose `push_started_at + push_interval_days` has passed → send all unsent letters via their chosen push method. Successfully sent letters are marked via `runCritical` (immediate sync to avoid data loss on crash).
+Runs every 5 minutes via recursive `setTimeout` (not `setInterval`) — ensures previous cycle completes before next starts, preventing overlapping executions.
+
+1. **Phase 1 — Alert overdue**: Users in `alert` status whose `alert_started_at + alert_interval_days` has passed → notify all emergency contacts (求救信息), set status to `push`, record `push_started_at`. Uses `runTransaction` with `WHERE status = 'alert'` guard for race-condition protection.
+2. **Phase 2 — Push overdue**: Users in `push` status whose `push_started_at + push_interval_days` has passed → re-queries current user status before acting (additional race-condition guard against check-in between query and send), then sends all unsent letters. Successfully sent letters marked via `runCritical` (immediate sync to avoid data loss on crash).
 3. **Housekeeping**: Expired email verification codes are cleaned up each cycle.
 
 ## Development Commands
 
 ```bash
 # Backend (from backend/)
-npm install
-npm run dev       # Start with --watch (auto-restart on changes)
-npm start         # Start without watch
+npm install && npm run dev   # Start with --watch (auto-restart on changes)
+npm start                    # Start without watch
 
 # Frontend (from frontend/)
-npm install
-npm run dev       # Vite dev server with HMR
-npm run build     # Production build
-npm run lint      # ESLint
-npm run preview   # Preview production build
+npm install && npm run dev   # Vite dev server with HMR
+npm run build                # Production build → frontend/dist/
+npm run lint                 # ESLint
+npm run preview              # Preview production build
 ```
 
 Start backend first, then frontend — Vite proxy handles API routing.
 
-**Production deployment**: Frontend is built to `frontend/dist/` and served by the backend as static files. Backend also serves `frontend/dist/index.html` as SPA fallback for all non-API routes. Supports Cloudflare tunnel for external access.
+**Production deployment**: Frontend is built to `frontend/dist/` and served by the backend as static files. Backend also serves `frontend/dist/index.html` as SPA fallback for all non-API routes.
 
 ## Production Deployment (Cloudflare Tunnel)
 
@@ -130,67 +126,34 @@ Tunnel 配置文件：`~/.cloudflared/config.yml`（ingress 规则指向 `http:/
 ## API Endpoints Summary
 
 ### Auth
-- `POST /api/auth/register` — 注册第一步（参数：email, nickname, password，发送验证码，返回 `needVerifyEmail: true`）
-- `POST /api/auth/register/verify` — 注册第二步（参数：email, code, nickname, password，验证码通过后创建用户）
-- `POST /api/auth/login` — 登录（参数 `account` 接受昵称或邮箱，无密码账号返回 403 + `needSetPassword: true`）
-- `POST /api/auth/logout` — 登出
-- `GET /api/auth/me` — 当前用户信息（含 `email`, `emailVerified`, `needBindEmail`）
-- `POST /api/auth/set-password` — 强制设置密码
-- `POST /api/auth/send-code` — 发送验证码（参数：email, type='register'|'bind'|'reset_password'）
-- `POST /api/auth/bind-email` — 绑定/更换邮箱（参数：email, code，需 auth）
-- `POST /api/auth/reset-password-request` — 请求重置密码（参数：email，发送验证码）
-- `POST /api/auth/reset-password` — 重置密码（参数：email, code, newPassword）
+POST `/api/auth/register` (发验证码) → `/api/auth/register/verify` (验证码+创建用户) | `/api/auth/login` (account=nickname|email) | `/api/auth/logout` | `GET /api/auth/me` (含 email, emailVerified, needBindEmail) | `/api/auth/set-password` | `/api/auth/send-code` (type=register|bind|reset_password) | `/api/auth/bind-email` | `/api/auth/reset-password-request` → `/api/auth/reset-password`
 
 ### Users
-- `GET /api/users/me` — 当前用户完整信息
-- `PUT /api/users/me` — 更新个人资料（nickname, signature, avatarUrl, gender）
-- `POST /api/users/me/avatar` — 上传头像
-- `POST /api/users/me/change-password` — 修改密码
-- `GET /api/users/:id` — 查看其他用户公开信息（nickname, avatar_url, gender, signature, created_at）
+`GET /api/users/me` | `PUT /api/users/me` (nickname, signature, avatarUrl, gender) | `POST /api/users/me/avatar` | `POST /api/users/me/change-password` | `GET /api/users/:id` (其他用户公开信息)
 
 ### Letters
-- `GET /api/letters` — 列表（`has_password` 替代原 `password` 字段）
-- `POST /api/letters` — 创建（push_method=4 时 pushTarget 可为空）
-- `GET /api/letters/:id` — 详情（需 `x-letter-token` header，通过 verify 获取）
-- `PUT /api/letters/:id` — 更新
-- `DELETE /api/letters/:id` — 删除
-- `POST /api/letters/:id/verify` — 验证信件密码，返回 `accessToken`（5分钟有效）
+`GET /api/letters` (has_password 替代 password) | `POST /api/letters` (push_method=4 时 pushTarget 可为空) | `GET /api/letters/:id` (需 x-letter-token header) | `PUT /api/letters/:id` | `DELETE /api/letters/:id` | `POST /api/letters/:id/verify` (返回 accessToken, 5min TTL)
 
 ### Posts (Community)
-- `GET /api/posts` — 列表（含 comment_count）
-- `POST /api/posts` — 发帖
-- `DELETE /api/posts/:id` — 删帖
-- `POST /api/posts/:id/like` — 点赞/取消
-- `GET /api/posts/:id/comments` — 评论列表
-- `POST /api/posts/:id/comments` — 发评论/回复
-- `DELETE /api/comments/:id` — 删评论
+`GET /api/posts` (含 comment_count) | `POST /api/posts` | `DELETE /api/posts/:id` | `POST /api/posts/:id/like` (toggle) | `GET /api/posts/:id/comments` | `POST /api/posts/:id/comments` (replyToId 可选) | `DELETE /api/comments/:id`
 
 ### Contacts
-- `GET /api/contacts` — 列表
-- `POST /api/contacts` — 添加
-- `PUT /api/contacts/:id` — 编辑
-- `DELETE /api/contacts/:id` — 删除
+`GET /api/contacts` | `POST /api/contacts` | `PUT /api/contacts/:id` | `DELETE /api/contacts/:id`
 
 ### Other
-- `POST /api/upload` — 图片上传
-- `GET /api/checkin` — 打卡状态（含 alert/push 倒计时）
-- `POST /api/checkin` — 打卡
-- `POST /api/checkin/notify` — 打卡后通知联系人
-- `PUT /api/checkin/interval` — 更新打卡间隔（alertDays, pushDays）
-- `GET /api/nearby-clinics` — 附近心理诊所（需 Amap API）
+`POST /api/upload` | `GET /api/checkin` (含 alert/push 倒计时) | `POST /api/checkin` | `POST /api/checkin/notify` | `PUT /api/checkin/interval` (alertDays, pushDays) | `GET /api/nearby-clinics`
 
 ## Key Technical Details
 
 - **sql.js persistence**: Database lives in memory and is throttled-saved to `juebixin.db` (500ms debounce). Data loss possible if process crashes within the debounce window. `SIGINT`/`SIGTERM` handlers force-save.
-- **DB helpers**: Shared `all`, `run`, `runCritical`, `get`, `runTransaction` functions extracted into `db-helpers.js`. `run` now returns rows modified count. `runCritical` performs immediate synchronous file save (bypasses the 500ms throttle) for key writes where data loss on crash is unacceptable (letter send/delete, status transitions). `runTransaction` wraps operations in `BEGIN`/`COMMIT`/`ROLLBACK` for atomicity. Used by both `server.js` and `scheduler.js`.
-- **Two-phase check-in**: `alert` → `push` → letter delivery. Check-in resets to `alert` phase, clears `push_started_at`, and updates `alert_started_at`. UPDATE uses `WHERE status IN ('alert', 'push')` to prevent overwriting scheduler state. Scheduler similarly uses `WHERE status = 'alert'` guard.
-- **Letter password protection**: Server-side scrypt hash stored in `letters.password` column. Verification via `POST /api/letters/:id/verify` returns a short-lived `accessToken` (5 min). Subsequent `GET /api/letters/:id` requires `x-letter-token` header. `stripPassword()` also adds `has_password` boolean for frontend display.
-- **Contact notifications**: On check-in, users can optionally notify contacts with preset ("我还安好" / "我已回来") or custom messages. On alert→push transition, contacts are automatically notified.
+- **DB helpers**: Shared `all`, `run`, `runCritical`, `get`, `runTransaction` functions extracted into `db-helpers.js`. `run` returns rows modified count. `runCritical` performs immediate synchronous file save (bypasses the 500ms throttle) for key writes (letter send/delete, status transitions). `runTransaction` wraps operations in `BEGIN`/`COMMIT`/`ROLLBACK` for atomicity.
+- **token_version flow**: JWT payload carries `tokenVersion`. Password change, password reset, and force-set-password all execute `token_version = token_version + 1`. Auth middleware reads current `token_version` from DB per request and rejects mismatched tokens with 401. This ensures stolen tokens are invalidated when the user changes their password.
+- **Scheduler race protection**: Uses recursive `setTimeout` (not `setInterval`) to prevent overlapping executions. Phase 1 uses SQL-level `WHERE status = 'alert'` guard. Phase 2 re-queries user's current status before sending letters — skips if user has since checked in and returned to `alert`.
+- **Two-phase check-in**: `alert` → `push` → letter delivery. Check-in resets to `alert` phase, clears `push_started_at`, and updates `alert_started_at`. UPDATE uses `WHERE status IN ('alert', 'push')` to prevent overwriting scheduler state.
+- **Letter password protection**: Server-side scrypt hash stored in `letters.password` column. Verification via `POST /api/letters/:id/verify` returns a short-lived `accessToken` (5 min). Subsequent `GET /api/letters/:id` requires `x-letter-token` header. `stripPassword()` adds `has_password` boolean for frontend display.
+- **Contact notifications**: On check-in, users can optionally notify contacts with preset ("我还安好" / "我已回来") or custom messages (max 500 chars). On alert→push transition, contacts are automatically notified.
 - **Amap integration**: Requires `AMAP_KEY` env var for nearby clinics. Falls back to hardcoded Beijing/Shanghai/Guangzhou clinics when key is missing or geolocation fails.
 - **Image uploads**: Stored as files in `backend/uploads/`, served as static assets at `/uploads/`. Post image URLs validated server-side (must start with `/uploads/`, extension whitelist) and stored as JSON string arrays in the `image_url` column.
 - **User profile cards in community**: Clicking avatar or name on posts/comments/replies shows a floating card with public profile info (nickname, avatar, gender, signature). Card is positioned near the clicked element. Implemented via `GET /api/users/:id` and `handleViewUser` in Community.jsx.
-- **Avatar upload**: Users can upload avatar images via `POST /api/users/me/avatar` (multipart form). Avatars displayed throughout community (posts, comments, replies) and profile page.
-- **Password change**: Authenticated users can change password via `POST /api/users/me/change-password` (requires old password verification, rate limited).
-- **Email verification codes**: Stored in `email_verification_codes` table. Code is 6-digit numeric, 5-minute TTL, max 5 failed verification attempts per code. New code invalidates previous code for same email+type. Scheduler cleans up expired codes every 5 minutes. `verifyCode()` checks attempts and deletes code after 5 failures.
-- **Email binding flow**: Existing users (`email IS NULL`) see `needBindEmail: true` from `/api/auth/me`, frontend shows `BindEmailPage` (similar to `ForceResetPage`). New users get email verified during registration. Email can be changed in Profile page via `/api/auth/bind-email` endpoint.
+- **Email verification codes**: Stored in `email_verification_codes` table. Code is 6-digit numeric, 5-minute TTL, max 5 failed verification attempts per code. New code invalidates previous code for same email+type. Scheduler cleans up expired codes every 5 minutes.
 - **Chinese-language codebase**: UI text, comments, and error messages are in Chinese. Maintain this convention.

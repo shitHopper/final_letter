@@ -55,7 +55,7 @@
 - 打卡成功后弹出通知弹窗（NotifyModal）：
   - 显示联系人列表，可勾选/全选
   - 默认消息预览（安好/回来）
-  - 可编辑自定义消息
+  - 可编辑自定义消息（最多 500 字）
   - 确认发送或跳过
 - 预警/推送期限双滑块设置
 - 温暖语录轮播（每 15-30 秒随机切换，30 条语录）
@@ -67,7 +67,7 @@
 
 **功能**：
 - 遗书 CRUD（创建、查看、编辑、删除）
-- 每封信件包含：标题、内容、推送方式、推送目标
+- 标题最多 100 字，内容最多 10000 字
 - 可选信件密码保护（查看时需验证）
 - 推送方式：
 
@@ -80,24 +80,30 @@
 
 - 信件状态：待发送 / 已送达
 - 信件密码使用 scrypt 哈希存储，验证有频率限制
+- 信件查看需先验证密码，获取 5 分钟有效 Token（x-letter-token header）
 
 ### 3.3 社区模块
 
 **功能**：
-- 发帖（文字 + 最多 9 张图片）
+- 发帖（文字最多 1000 字 + 最多 9 张图片）
 - 图片上传（支持 jpg/png/gif/webp，单张 5MB 限制，不允许 SVG）
 - 点赞/取消点赞
-- 评论与回复（支持嵌套，显示 @被回复人）
-- 删除自己的帖子和评论
+- 评论与回复（最多 300 字，支持嵌套，显示 @被回复人）
+- 删除自己的帖子和评论（带确认弹窗）
+- 点击头像/昵称查看用户公开信息卡片
 - 遗书推送方式为「公开到社区」时，系统自动发布帖子
 
 ### 3.4 个人模块
 
 **功能**：
-- 编辑昵称和个性签名
+- 编辑昵称（≤50 字）和个性签名（≤200 字）
+- 头像上传
+- 性别设置
+- 邮箱显示/绑定/更换（通过验证码验证）
+- 修改密码（需旧密码确认，修改后所有已登录设备强制下线）
 - 打卡信息展示（当前状态、预警/推送期限天数、上次打卡时间、注册时间）
 - 紧急联系人管理：
-  - 添加联系人（称呼 + 通知方式 + 联系方式）
+  - 添加联系人（称呼 ≤50 字，联系方式 ≤200 字）
   - 编辑/删除联系人
   - 通知方式：1=邮件、2=短信
 - 退出登录
@@ -106,15 +112,94 @@
 
 ## 四、认证体系
 
-- 注册：昵称 + 密码（至少4位），昵称唯一
-- 登录：昵称 + 密码
-- JWT 认证，token 存于 httpOnly cookie，有效期 7 天
-- 旧账号无密码时强制设置密码（forceReset 机制）
-- 速率限制：注册/登录 15 分钟内最多 10 次，信件密码验证 15 分钟内最多 20 次
+### 4.1 注册（两步流程）
+
+1. 用户提交邮箱 + 昵称 + 密码 → 系统发送 6 位验证码到邮箱
+2. 用户提交验证码 → 系统创建账号，邮箱标记为已验证，自动登录
+
+- 密码至少 4 位，服务端 scrypt 哈希存储（16 字节随机盐）
+- 昵称唯一（数据库唯一索引约束，重复昵称返回 400）
+- 邮箱唯一（已验证邮箱不可重复注册）
+
+### 4.2 登录
+
+- 支持昵称或邮箱登录（`account` 参数）
+- 邮箱登录要求 email_verified = 1
+- JWT 认证，token 存于 httpOnly cookie
+- Token 有效期：注册 3 天，登录 7 天
+- Cookie SameSite 策略动态适配 HTTP/HTTPS
+
+### 4.3 Token 失效机制（token_version）
+
+- JWT payload 包含 `tokenVersion` 字段
+- 用户修改密码、重置密码、强制设置密码时，`users.token_version` 自增
+- Auth 中间件每次请求校验 JWT 中的 tokenVersion 与数据库当前值
+- 不匹配 → 返回 401，强制重新登录
+- 效果：一处改密码，所有设备同时下线
+
+### 4.4 邮箱验证
+
+- 6 位数字验证码，5 分钟有效
+- 最多 5 次错误尝试，超出后验证码作废
+- 发送频率限制：同一邮箱 60 秒间隔，每日 10 次上限
+- 新验证码自动作废同邮箱同类型的旧验证码
+- 类型：register（注册）、bind（绑定/更换邮箱）、reset_password（重置密码）
+
+### 4.5 邮箱绑定流程
+
+- 旧账号（email IS NULL）登录后 `/api/auth/me` 返回 `needBindEmail: true`
+- 前端显示绑定邮箱页面（类似强制设置密码流程）
+- 已绑定邮箱的用户可在个人页面更换邮箱（需验证新邮箱）
+
+### 4.6 密码重置
+
+- 用户提交已注册邮箱 → 发送验证码
+- 用户提交验证码 + 新密码 → 重置密码，token_version 自增
+
+### 4.7 强制设置密码
+
+- 旧数据迁移中无密码的账号，登录返回 403 + `needSetPassword: true`
+- 前端引导用户设置密码后才能正常使用
 
 ---
 
-## 五、联系人体系与遗书推送目标
+## 五、安全防护
+
+### 5.1 CSRF 防护
+
+- 状态变更请求（POST/PUT/DELETE）校验 Origin/Referer 请求头
+- 与 CORS_ORIGINS 白名单比对，不匹配返回 403
+- GET/HEAD/OPTIONS 和无 Origin 的请求（原生 App、curl）放行
+
+### 5.2 输入校验
+
+所有用户输入均有字符长度上限，服务端强制校验：
+
+| 字段 | 上限 | 适用端点 |
+|------|------|---------|
+| 昵称 | 50 字 | 注册、修改资料 |
+| 个性签名 | 200 字 | 修改资料 |
+| 信件标题 | 100 字 | 创建/编辑信件 |
+| 信件内容 | 10000 字 | 创建/编辑信件 |
+| 帖子内容 | 1000 字 | 发帖 |
+| 评论内容 | 300 字 | 发评论/回复 |
+| 通知自定义消息 | 500 字 | 打卡通知 |
+| 联系人称呼 | 50 字 | 添加/编辑联系人 |
+| 联系方式 | 200 字 | 添加/编辑联系人 |
+
+### 5.3 其他安全措施
+
+- CSP / X-Frame-Options / X-Content-Type-Options 安全响应头
+- 速率限制（注册/登录 10次/15分钟，密码验证 20次/15分钟，改密 5次/15分钟）
+- 图片上传过滤（扩展名白名单 .jpg/.jpeg/.png/.gif/.webp，SVG 禁止，MIME 类型检查，5MB 限制）
+- 图片 URL 路径白名单校验（必须以 /uploads/ 开头）
+- HTML 邮件模板 escapeHtml 防 XSS
+- JWT_SECRET 必填，服务端启动时检查
+- 信件访问 Token 一次性使用，防重放
+
+---
+
+## 六、联系人体系与遗书推送目标
 
 两套独立的联系体系：
 
@@ -127,36 +212,44 @@
 
 ---
 
-## 六、后端调度器
+## 七、后端调度器
 
-每 5 分钟执行一次检查：
+每 5 分钟执行一次检查，使用递归 `setTimeout`（非 `setInterval`）—— 确保上次执行完成后才启动下一次，防止重叠执行。
 
 **阶段1 — 预警期限超时检测**：
 1. 查找 status='alert' 且 alert_started_at + alert_interval_days < now 的用户
 2. 向该用户所有紧急联系人发送求救信息
-3. 更新 status='push'，记录 push_started_at = now
+3. 使用事务更新 status='push'，记录 push_started_at = now（WHERE status='alert' 防竞态）
 
 **阶段2 — 推送期限超时检测**：
 1. 查找 status='push' 且 push_started_at + push_interval_days < now 的用户
-2. 查找该用户所有未发送遗书（is_sent=0）
-3. 按 push_method 逐封发送：
+2. 逐个重新查询用户当前状态（第二次竞态防护：防止用户在查询列表后已完成打卡回退到 alert）
+3. 状态已变更则跳过，否则查找所有未发送遗书（is_sent=0）
+4. 按 push_method 逐封发送：
    - 邮件：通过 SMTP 发送 HTML 邮件
    - 短信/实体信：日志模拟
    - 社区公开：自动创建帖子
-4. 发送成功标记 is_sent=1，记录 sent_at
+5. 发送成功标记 is_sent=1，记录 sent_at（使用 runCritical 立即持久化）
+
+**阶段3 — 清理**：删除过期的邮箱验证码记录。
 
 ---
 
-## 七、API 接口清单
+## 八、API 接口清单
 
 ### 认证
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | /api/auth/register | 注册 |
-| POST | /api/auth/login | 登录 |
+| POST | /api/auth/register | 注册第一步（发送验证码） |
+| POST | /api/auth/register/verify | 注册第二步（验证码 + 创建用户） |
+| POST | /api/auth/login | 登录（昵称或邮箱） |
 | GET | /api/auth/me | 获取当前用户信息 |
 | POST | /api/auth/logout | 退出登录 |
-| POST | /api/auth/set-password | 设置密码（旧账号强制） |
+| POST | /api/auth/set-password | 强制设置密码（token_version+1） |
+| POST | /api/auth/send-code | 发送邮箱验证码 |
+| POST | /api/auth/bind-email | 绑定/更换邮箱 |
+| POST | /api/auth/reset-password-request | 请求密码重置 |
+| POST | /api/auth/reset-password | 重置密码（token_version+1） |
 
 ### 打卡
 | 方法 | 路径 | 说明 |
@@ -171,10 +264,10 @@
 |------|------|------|
 | GET | /api/letters | 列出所有信件 |
 | POST | /api/letters | 创建信件 |
-| GET | /api/letters/:id | 获取信件详情 |
+| GET | /api/letters/:id | 获取信件详情（需 x-letter-token） |
 | PUT | /api/letters/:id | 编辑信件 |
 | DELETE | /api/letters/:id | 删除信件 |
-| POST | /api/letters/:id/verify | 验证信件密码 |
+| POST | /api/letters/:id/verify | 验证信件密码（返回 accessToken） |
 
 ### 社区
 | 方法 | 路径 | 说明 |
@@ -192,6 +285,9 @@
 |------|------|------|
 | GET | /api/users/me | 获取个人信息 |
 | PUT | /api/users/me | 编辑个人信息 |
+| POST | /api/users/me/avatar | 上传头像 |
+| POST | /api/users/me/change-password | 修改密码（token_version+1） |
+| GET | /api/users/:id | 查看其他用户公开信息 |
 | GET | /api/contacts | 列出紧急联系人 |
 | POST | /api/contacts | 添加联系人 |
 | PUT | /api/contacts/:id | 编辑联系人 |
@@ -205,16 +301,21 @@
 
 ---
 
-## 八、数据库表结构
+## 九、数据库表结构
 
 ### users
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | id | INTEGER PK | 自增 | |
-| nickname | TEXT | '匿名用户' | 唯一 |
+| nickname | TEXT | '匿名用户' | 唯一索引 |
+| email | TEXT | NULL | 唯一索引（WHERE email IS NOT NULL） |
+| email_verified | INTEGER | 0 | 邮箱是否已验证 |
 | signature | TEXT | '' | 个性签名 |
+| avatar_url | TEXT | '' | 头像路径 |
+| gender | TEXT | '' | 性别 |
 | password | TEXT | NULL | scrypt 哈希 |
 | force_reset | INTEGER | 0 | 是否需要设置密码 |
+| token_version | INTEGER | 0 | JWT 版本号，改密时自增 |
 | checkin_interval_days | INTEGER | 3 | 旧字段，保留兼容 |
 | alert_interval_days | INTEGER | 3 | 预警期限天数 |
 | push_interval_days | INTEGER | 3 | 推送期限天数 |
@@ -275,16 +376,29 @@
 | post_id | INTEGER | 联合主键 |
 | user_id | INTEGER | 联合主键 |
 
+### email_verification_codes（邮箱验证码）
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | INTEGER PK | 自增 |
+| email | TEXT | 邮箱地址 |
+| code | TEXT | 6 位数字验证码 |
+| type | TEXT | register / bind / reset_password |
+| user_id | INTEGER | 关联用户 ID（bind/reset 时使用） |
+| attempts | INTEGER | 已尝试次数，默认 0 |
+| expires_at | TEXT | 过期时间 |
+| created_at | TEXT | datetime('now') |
+
 ---
 
-## 九、技术实现
+## 十、技术实现
 
 ### 当前 Demo 阶段
-- 前端：React 19 + Vite SPA
-- 后端：Express.js + sql.js（SQLite 内存数据库，持久化到文件）
+- 前端：React 19 + Vite 8 SPA
+- 后端：Express.js 4 + sql.js（SQLite 内存数据库，持久化到文件）
+- 认证：JWT + httpOnly Cookie + token_version 失效机制
 - 邮件：阿里云邮件推送（SMTP），无配置时为日志模拟
 - 短信/实体信：日志模拟
-- 部署：Cloudflare Quick Tunnel 内网穿刺（需 `--protocol http2`）
+- 部署：Cloudflare Named Tunnel 内网穿刺
 
 ### 正式落地技术选型（方案A）
 - 前端：Flutter
@@ -295,9 +409,12 @@
 - 部署：Docker + 云服务器
 
 ### 安全措施
-- JWT + httpOnly cookie 认证
+- JWT + httpOnly cookie 认证，含 token_version 失效机制
+- CSRF 防护（Origin/Referer 请求头校验）
 - scrypt 密码哈希
+- 全端点输入长度校验
 - CSP / X-Frame-Options / X-Content-Type-Options 安全头
-- 速率限制（注册登录、密码验证）
+- 速率限制（注册登录、密码验证、改密）
 - 图片上传过滤（类型、大小、SVG 禁止）
 - 图片 URL 路径白名单校验
+- 信件访问 Token 一次性使用
