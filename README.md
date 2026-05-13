@@ -365,9 +365,41 @@ npm start
 
 ## 部署
 
-### 生产环境（Cloudflare Tunnel）
+### 生产环境（Cloudflare Tunnel 内网穿刺）
 
-域名为 `juebixin.asia`，通过 Cloudflare Named Tunnel 内网穿刺部署：
+内网穿刺允许没有公网 IP 的电脑将服务暴露到公网。本项目通过 Cloudflare Named Tunnel 实现，启动后可通过自定义域名访问。
+
+#### 前提条件
+
+- 一个 [Cloudflare](https://cloudflare.com) 账号
+- 一个托管在 Cloudflare 的域名（DNS 需在 Cloudflare 解析）
+- 安装 `cloudflared` CLI 工具（[下载地址](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)）
+
+#### 首次搭建（新开发者）
+
+```bash
+# 1. 登录 Cloudflare
+cloudflared tunnel login
+
+# 2. 创建命名隧道
+cloudflared tunnel create <隧道名称>
+
+# 3. 编写配置文件 ~/.cloudflared/config.yml
+# tunnel: <隧道ID>
+# credentials-file: /path/to/<隧道ID>.json
+# ingress:
+#   - hostname: your-domain.com
+#     service: http://localhost:3000
+#   - hostname: www.your-domain.com
+#     service: http://localhost:3000
+#   - service: http_status:404
+
+# 4. 配置 DNS（将域名 CNAME 指向隧道）
+cloudflared tunnel route dns <隧道名称> your-domain.com
+cloudflared tunnel route dns <隧道名称> www.your-domain.com
+```
+
+#### 日常启动三步
 
 ```bash
 # 1. 构建前端
@@ -376,11 +408,11 @@ cd frontend && npm run build
 # 2. 启动后端
 cd backend && npm run dev
 
-# 3. 启动 Cloudflare 隧道
-cloudflared tunnel run juebixin
+# 3. 启动隧道
+cloudflared tunnel run <隧道名称>
 ```
 
-Tunnel 配置文件中 ingress 规则指向 `http://localhost:3000`。
+Tunnel 配置文件的 ingress 规则指向 `http://localhost:3000`。
 
 ### HTTPS / 安全
 
