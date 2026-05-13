@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { apiFetch } from '../api'
+import { apiFetch, apiFetchJson } from '../api'
 
 export default function CommunityPage({ userId }) {
   const [posts, setPosts] = useState([])
@@ -27,16 +27,17 @@ export default function CommunityPage({ userId }) {
     if (y + cardHeight > window.innerHeight) y = rect.top - cardHeight - 6
     if (x < 8) x = 8
     setUserCardPos({ x, y })
-    const res = await apiFetch(`/api/users/${userId}`)
-    if (res.ok) {
-      const data = await res.json()
+    try {
+      const data = await apiFetchJson(`/api/users/${userId}`)
       setViewingUser(data)
-    }
+    } catch {}
   }
 
   const fetchPosts = async () => {
-    const res = await apiFetch('/api/posts')
-    setPosts(await res.json())
+    try {
+      const data = await apiFetchJson('/api/posts')
+      setPosts(data)
+    } catch {}
   }
 
   useEffect(() => { fetchPosts() }, [])
@@ -63,9 +64,7 @@ export default function CommunityPage({ userId }) {
   const uploadImage = async (file) => {
     const formData = new FormData()
     formData.append('image', file)
-    const res = await apiFetch('/api/upload', { method: 'POST', body: formData })
-    if (!res.ok) throw new Error('图片上传失败')
-    const data = await res.json()
+    const data = await apiFetchJson('/api/upload', { method: 'POST', body: formData })
     return data.url
   }
 
@@ -78,11 +77,10 @@ export default function CommunityPage({ userId }) {
         const url = await uploadImage(file)
         imageUrls.push(url)
       }
-      const res = await apiFetch('/api/posts', {
+      await apiFetchJson('/api/posts', {
         method: 'POST',
         body: JSON.stringify({ content: newPost, imageUrls }),
       })
-      if (!res.ok) throw new Error('发布失败')
       setNewPost('')
       setNewImages([])
       setImagePreviews([])
@@ -104,13 +102,14 @@ export default function CommunityPage({ userId }) {
   }
 
   const toggleLike = async (postId) => {
-    const res = await apiFetch(`/api/posts/${postId}/like`, {
-      method: 'POST',
-    })
-    const data = await res.json()
-    if (data.success) {
-      fetchPosts()
-    }
+    try {
+      const data = await apiFetchJson(`/api/posts/${postId}/like`, {
+        method: 'POST',
+      })
+      if (data.success) {
+        fetchPosts()
+      }
+    } catch {}
   }
 
   const fetchComments = async (postId) => {
@@ -119,11 +118,12 @@ export default function CommunityPage({ userId }) {
       setReplyTo(null)
       return
     }
-    const res = await apiFetch(`/api/posts/${postId}/comments`)
-    const data = await res.json()
-    setComments(prev => ({ ...prev, [postId]: data }))
-    setOpenComments(postId)
-    setReplyTo(null)
+    try {
+      const data = await apiFetchJson(`/api/posts/${postId}/comments`)
+      setComments(prev => ({ ...prev, [postId]: data }))
+      setOpenComments(postId)
+      setReplyTo(null)
+    } catch {}
   }
 
   const addComment = async (postId) => {
@@ -132,16 +132,19 @@ export default function CommunityPage({ userId }) {
     if (replyTo) {
       payload.replyToId = replyTo.id
     }
-    await apiFetch(`/api/posts/${postId}/comments`, {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    })
-    setNewComment('')
-    setReplyTo(null)
-    const res = await apiFetch(`/api/posts/${postId}/comments`)
-    const data = await res.json()
-    setComments(prev => ({ ...prev, [postId]: data }))
-    fetchPosts()
+    try {
+      await apiFetchJson(`/api/posts/${postId}/comments`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      })
+      setNewComment('')
+      setReplyTo(null)
+      const data = await apiFetchJson(`/api/posts/${postId}/comments`)
+      setComments(prev => ({ ...prev, [postId]: data }))
+      fetchPosts()
+    } catch (e) {
+      alert(e.message || '评论失败')
+    }
   }
 
   const handleReply = (comment) => {
@@ -149,17 +152,18 @@ export default function CommunityPage({ userId }) {
   }
 
   const deletePost = async (postId) => {
-    await apiFetch(`/api/posts/${postId}`, { method: 'DELETE' })
+    try { await apiFetchJson(`/api/posts/${postId}`, { method: 'DELETE' }) } catch {}
     setConfirmDelete(null)
     fetchPosts()
   }
 
   const deleteComment = async (commentId, postId) => {
-    await apiFetch(`/api/comments/${commentId}`, { method: 'DELETE' })
+    try { await apiFetchJson(`/api/comments/${commentId}`, { method: 'DELETE' }) } catch {}
     setConfirmDelete(null)
-    const res = await apiFetch(`/api/posts/${postId}/comments`)
-    const data = await res.json()
-    setComments(prev => ({ ...prev, [postId]: data }))
+    try {
+      const data = await apiFetchJson(`/api/posts/${postId}/comments`)
+      setComments(prev => ({ ...prev, [postId]: data }))
+    } catch {}
     fetchPosts()
   }
 

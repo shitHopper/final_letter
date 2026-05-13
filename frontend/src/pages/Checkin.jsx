@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { apiFetch } from '../api'
+import { apiFetch, apiFetchJson } from '../api'
 
 const WARM_QUOTES = [
   "你不需要完美，你只需要真实。",
@@ -154,17 +154,19 @@ export default function CheckinPage({ userId }) {
   const quoteTimerRef = useRef(null)
 
   const fetchInfo = async () => {
-    const res = await apiFetch('/api/checkin')
-    const data = await res.json()
-    setInfo(data)
-    setAlertDays(data.alertIntervalDays)
-    setPushDays(data.pushIntervalDays)
+    try {
+      const data = await apiFetchJson('/api/checkin')
+      setInfo(data)
+      setAlertDays(data.alertIntervalDays)
+      setPushDays(data.pushIntervalDays)
+    } catch {}
   }
 
   const fetchContacts = async () => {
-    const res = await apiFetch('/api/contacts')
-    const data = await res.json()
-    setContacts(data)
+    try {
+      const data = await apiFetchJson('/api/contacts')
+      setContacts(data)
+    } catch {}
   }
 
   const tick = () => {
@@ -212,8 +214,7 @@ export default function CheckinPage({ userId }) {
         navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 5000 })
       })
       const { latitude, longitude } = pos.coords
-      const res = await apiFetch(`/api/nearby-clinics?lng=${longitude}&lat=${latitude}`)
-      const data = await res.json()
+      const data = await apiFetchJson(`/api/nearby-clinics?lng=${longitude}&lat=${latitude}`)
       if (data.pois) {
         setClinics(data.pois.map(poi => ({
           name: poi.name,
@@ -234,39 +235,48 @@ export default function CheckinPage({ userId }) {
 
   const doCheckin = async () => {
     setChecking(true)
-    const res = await apiFetch('/api/checkin', { method: 'POST' })
-    const data = await res.json()
-    if (data.success) {
-      fetchInfo()
-      if (data.canNotify) {
-        setNotifyModal({ type: data.prevStatus === 'push' ? 'back' : 'well' })
-      } else {
-        setMsg('打卡成功！')
-        setTimeout(() => setMsg(''), 2000)
+    try {
+      const data = await apiFetchJson('/api/checkin', { method: 'POST' })
+      if (data.success) {
+        fetchInfo()
+        if (data.canNotify) {
+          setNotifyModal({ type: data.prevStatus === 'push' ? 'back' : 'well' })
+        } else {
+          setMsg('打卡成功！')
+          setTimeout(() => setMsg(''), 2000)
+        }
       }
+    } catch (e) {
+      setMsg(e.message || '打卡失败')
+      setTimeout(() => setMsg(''), 3000)
     }
     setChecking(false)
   }
 
   const handleNotify = async ({ type, customMessage, contactIds }) => {
-    await apiFetch('/api/checkin/notify', {
-      method: 'POST',
-      body: JSON.stringify({ type, customMessage, contactIds }),
-    })
-    setNotifyModal(null)
-    setMsg(type === 'back' ? '已通知联系人你回来了' : '已发送安好信息')
-    setTimeout(() => setMsg(''), 3000)
+    try {
+      await apiFetchJson('/api/checkin/notify', {
+        method: 'POST',
+        body: JSON.stringify({ type, customMessage, contactIds }),
+      })
+      setNotifyModal(null)
+      setMsg(type === 'back' ? '已通知联系人你回来了' : '已发送安好信息')
+      setTimeout(() => setMsg(''), 3000)
+    } catch {}
   }
 
   const updateInterval = async () => {
-    const res = await apiFetch('/api/checkin/interval', {
-      method: 'PUT',
-      body: JSON.stringify({ alertDays, pushDays }),
-    })
-    const data = await res.json()
-    if (data.success) {
-      setMsg('间隔已更新')
-      fetchInfo()
+    try {
+      const data = await apiFetchJson('/api/checkin/interval', {
+        method: 'PUT',
+        body: JSON.stringify({ alertDays, pushDays }),
+      })
+      if (data.success) {
+        setMsg('间隔已更新')
+        fetchInfo()
+      }
+    } catch {
+      setMsg('更新失败')
     }
     setTimeout(() => setMsg(''), 2000)
   }

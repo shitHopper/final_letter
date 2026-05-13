@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { apiFetch } from '../api'
+import { apiFetch, apiFetchJson } from '../api'
 
 const PUSH_METHODS = [
   { value: 1, label: '电子邮件' },
@@ -93,51 +93,61 @@ export default function LettersPage({ userId }) {
   const [deleteTarget, setDeleteTarget] = useState(null)
 
   const fetchLetters = async () => {
-    const res = await apiFetch('/api/letters')
-    setLetters(await res.json())
+    try {
+      const data = await apiFetchJson('/api/letters')
+      setLetters(data)
+    } catch {}
   }
 
   useEffect(() => { fetchLetters() }, [])
 
   const createLetter = async (e) => {
     e.preventDefault()
-    const res = await apiFetch('/api/letters', {
-      method: 'POST',
-      body: JSON.stringify({ ...form }),
-    })
-    const data = await res.json()
-    if (data.success) {
-      setForm({ title: '', content: '', pushMethod: 1, pushTarget: '', password: '' })
-      setShowForm(false)
-      fetchLetters()
-      setMsg('信件已保存')
+    try {
+      const data = await apiFetchJson('/api/letters', {
+        method: 'POST',
+        body: JSON.stringify({ ...form }),
+      })
+      if (data.success) {
+        setForm({ title: '', content: '', pushMethod: 1, pushTarget: '', password: '' })
+        setShowForm(false)
+        fetchLetters()
+        setMsg('信件已保存')
+      }
+    } catch (e) {
+      alert(e.message || '保存失败')
     }
     setTimeout(() => setMsg(''), 2000)
   }
 
   const updateLetter = async () => {
-    const res = await apiFetch(`/api/letters/${editingLetter.id}`, {
-      method: 'PUT',
-      body: JSON.stringify({
-        title: editForm.title,
-        content: editForm.content,
-        pushMethod: editForm.pushMethod,
-        pushTarget: editForm.pushTarget,
-        password: editForm.password || undefined,
-      }),
-    })
-    const data = await res.json()
-    if (data.success) {
-      setEditingLetter(null)
-      setViewingLetter(null)
-      fetchLetters()
-      setMsg('信件已更新')
+    try {
+      const data = await apiFetchJson(`/api/letters/${editingLetter.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          title: editForm.title,
+          content: editForm.content,
+          pushMethod: editForm.pushMethod,
+          pushTarget: editForm.pushTarget,
+          password: editForm.password || undefined,
+        }),
+      })
+      if (data.success) {
+        setEditingLetter(null)
+        setViewingLetter(null)
+        fetchLetters()
+        setMsg('信件已更新')
+      }
+    } catch (e) {
+      alert(e.message || '更新失败')
     }
     setTimeout(() => setMsg(''), 2000)
   }
 
   const doDelete = async (id) => {
-    await apiFetch(`/api/letters/${id}`, { method: 'DELETE' })
+    try {
+      await apiFetchJson(`/api/letters/${id}`, { method: 'DELETE' })
+    } catch {}
     setDeleteTarget(null)
     setViewingLetter(null)
     fetchLetters()
@@ -149,35 +159,39 @@ export default function LettersPage({ userId }) {
       setPwdModalTarget(letter)
       return
     }
-    const verifyRes = await apiFetch(`/api/letters/${letter.id}/verify`, { method: 'POST' })
-    const verifyData = await verifyRes.json()
-    if (!verifyData.verified) return
-    const token = verifyData.accessToken
-    const detail = await apiFetch(`/api/letters/${letter.id}`, {
-      headers: token ? { 'x-letter-token': token } : {},
-    })
-    const data = await detail.json()
-    setViewingLetter(data)
+    try {
+      const verifyData = await apiFetchJson(`/api/letters/${letter.id}/verify`, { method: 'POST' })
+      if (!verifyData.verified) return
+      const token = verifyData.accessToken
+      const data = await apiFetchJson(`/api/letters/${letter.id}`, {
+        headers: token ? { 'x-letter-token': token } : {},
+      })
+      setViewingLetter(data)
+    } catch (e) {
+      alert(e.message || '查看失败')
+    }
   }
 
   const onPasswordSubmit = async (password) => {
     if (password === null) { setPwdError(''); return }
-    const res = await apiFetch(`/api/letters/${pwdModalTarget.id}/verify`, {
-      method: 'POST',
-      body: JSON.stringify({ password }),
-    })
-    const data = await res.json()
-    if (data.verified) {
-      const token = data.accessToken
-      const detail = await apiFetch(`/api/letters/${pwdModalTarget.id}`, {
-        headers: token ? { 'x-letter-token': token } : {},
+    try {
+      const data = await apiFetchJson(`/api/letters/${pwdModalTarget.id}/verify`, {
+        method: 'POST',
+        body: JSON.stringify({ password }),
       })
-      const letter = await detail.json()
-      setViewingLetter(letter)
-      setPwdModalTarget(null)
-      setPwdError('')
-    } else {
-      setPwdError(data.error || '密码错误')
+      if (data.verified) {
+        const token = data.accessToken
+        const letter = await apiFetchJson(`/api/letters/${pwdModalTarget.id}`, {
+          headers: token ? { 'x-letter-token': token } : {},
+        })
+        setViewingLetter(letter)
+        setPwdModalTarget(null)
+        setPwdError('')
+      } else {
+        setPwdError('密码错误')
+      }
+    } catch (e) {
+      setPwdError(e.message || '密码错误')
     }
   }
 

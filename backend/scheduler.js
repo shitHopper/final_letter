@@ -2,7 +2,7 @@ const nodemailer = require("nodemailer");
 const { createHelpers } = require("./db-helpers");
 
 let db, saveDb;
-let all, run, get;
+let all, run, runCritical, get, runTransaction;
 let checkInterval;
 
 function escapeHtml(str) {
@@ -94,8 +94,13 @@ async function checkOverdueAndSend() {
 
     await notifyContacts(user.id, `紧急：${user.nickname} 可能需要帮助`, "我可能遇上了麻烦，我可能失联了，请寻找我。");
 
-    // 使用 WHERE status = 'alert' 防止覆盖已打卡的状态
-    run("UPDATE users SET status = 'push', push_started_at = ? WHERE id = ? AND status = 'alert'", [new Date().toISOString(), user.id]);
+    // 事务保护：确认状态仍为 alert 再更新，防止与打卡接口竞态
+    runTransaction(() => {
+      db.run("UPDATE users SET status = 'push', push_started_at = ? WHERE id = ? AND status = 'alert'", [new Date().toISOString(), user.id]);
+      if (!db.getRowsModified()) {
+        console.log(`[调度] 用户${user.id}状态已变更，跳过更新`);
+      }
+    });
   }
 
   // ===== 阶段2：推送期限超时 → 发送遗书 =====
@@ -111,53 +116,60 @@ async function checkOverdueAndSend() {
   if (pushOverdueUsers.length === 0) return;
 
   for (const user of pushOverdueUsers) {
-    const letters = all("SELECT * FROM letters WHERE user_id = ? AND is_sent = 0", [user.id]);
-    if (letters.length === 0) continue;
+    try {
+      const letters = all("SELECT * FROM letters WHERE user_id = ? AND is_sent = 0", [user.id]);
+      if (letters.length === 0) continue;
 
-    console.log(`[调度] 用户"${user.nickname}"(id=${user.id})推送期限超时，发现${letters.length}封未发送遗书`);
+      console.log(`[调度] 用户"${user.nickname}"(id=${user.id})推送期限超时，发现${letters.length}封未发送遗书`);
 
-    for (const letter of letters) {
-      let sent = false;
+      for (const letter of letters) {
+        let sent = false;
 
-      switch (letter.push_method) {
-        case 1: {
-          const html = `<div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:20px;">
-            <h2 style="color:#6c5ce7;">来自「绝笔信」的一封信</h2>
-            <p>用户 <strong>${escapeHtml(user.nickname)}</strong> 未能按时打卡，以下是其留下的信件：</p>
-            <div style="background:#f8f9fa;border-radius:12px;padding:16px;margin:16px 0;">
-              <h3>${escapeHtml(letter.title)}</h3>
-              <p style="white-space:pre-wrap;line-height:1.8;">${escapeHtml(letter.content)}</p>
-            </div>
-            <p style="color:#636e72;font-size:12px;">此信由「绝笔信」应用自动送达</p>
-          </div>`;
-          sent = await sendEmail(letter.push_target, `来自「绝笔信」的一封信：${letter.title}`, html);
-          break;
+        switch (letter.push_method) {
+          case 1: {
+            const html = `<div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:20px;">
+              <h2 style="color:#6c5ce7;">来自「绝笔信」的一封信</h2>
+              <p>用户 <strong>${escapeHtml(user.nickname)}</strong> 未能按时打卡，以下是其留下的信件：</p>
+              <div style="background:#f8f9fa;border-radius:12px;padding:16px;margin:16px 0;">
+                <h3>${escapeHtml(letter.title)}</h3>
+                <p style="white-space:pre-wrap;line-height:1.8;">${escapeHtml(letter.content)}</p>
+              </div>
+              <p style="color:#636e72;font-size:12px;">此信由「绝笔信」应用自动送达</p>
+            </div>`;
+            sent = await sendEmail(letter.push_target, `来自「绝笔信」的一封信：${letter.title}`, html);
+            break;
+          }
+          case 2: {
+            console.log(`[短信-模拟] 收信人: ${letter.push_target}, 内容: ${letter.title} - ${letter.content.slice(0, 50)}...`);
+            sent = true;
+            break;
+          }
+          case 3: {
+            console.log(`[实体信-模拟] 收件地址: ${letter.push_target}, 标题: ${letter.title}`);
+            sent = true;
+            break;
+          }
+          case 4: {
+            publishToCommunity(user.id, letter);
+            sent = true;
+            break;
+          }
+          default:
+            console.log(`[未知推送方式] method=${letter.push_method}`);
         }
-        case 2: {
-          console.log(`[短信-模拟] 收信人: ${letter.push_target}, 内容: ${letter.title} - ${letter.content.slice(0, 50)}...`);
-          sent = true;
-          break;
+
+        if (sent) {
+          const sentAt = new Date().toISOString();
+          runCritical("UPDATE letters SET is_sent = 1, sent_at = ? WHERE id = ?", [sentAt, letter.id]);
         }
-        case 3: {
-          console.log(`[实体信-模拟] 收件地址: ${letter.push_target}, 标题: ${letter.title}`);
-          sent = true;
-          break;
-        }
-        case 4: {
-          publishToCommunity(user.id, letter);
-          sent = true;
-          break;
-        }
-        default:
-          console.log(`[未知推送方式] method=${letter.push_method}`);
       }
-
-      if (sent) {
-        const sentAt = new Date().toISOString();
-        run("UPDATE letters SET is_sent = 1, sent_at = ? WHERE id = ?", [sentAt, letter.id]);
-      }
+    } catch (err) {
+      console.error(`[调度] 处理用户${user.id}推送信件时出错: ${err.message}`);
     }
   }
+
+  // 清理过期验证码
+  run("DELETE FROM email_verification_codes WHERE expires_at < datetime('now')");
 }
 
 function startScheduler(dbInstance, saveFn) {
@@ -166,7 +178,9 @@ function startScheduler(dbInstance, saveFn) {
   const helpers = createHelpers(db, saveDb);
   all = helpers.all;
   run = helpers.run;
+  runCritical = helpers.runCritical;
   get = helpers.get;
+  runTransaction = helpers.runTransaction;
 
   checkInterval = setInterval(checkOverdueAndSend, 5 * 60 * 1000);
 

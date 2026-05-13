@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { apiFetch } from '../api'
+import { apiFetch, apiFetchJson } from '../api'
 
 const NOTIFY_METHODS = [
   { value: 1, label: '邮件' },
@@ -76,41 +76,53 @@ export default function ProfilePage({ onLogout }) {
   const [confirmPassword, setConfirmPassword] = useState('')
   const [passwordError, setPasswordError] = useState('')
 
+  // Email change
+  const [showChangeEmail, setShowChangeEmail] = useState(false)
+  const [newEmail, setNewEmail] = useState('')
+  const [emailCode, setEmailCode] = useState('')
+  const [emailCountdown, setEmailCountdown] = useState(0)
+  const [emailSending, setEmailSending] = useState(false)
+  const [emailError, setEmailError] = useState('')
+
   const parseUTC = (dateStr) => {
     const utcStr = dateStr.includes('T') ? dateStr : dateStr.replace(' ', 'T') + 'Z'
     return new Date(utcStr)
   }
 
   const fetchUser = async () => {
-    const res = await apiFetch('/api/users/me')
-    const data = await res.json()
-    setUser(data)
-    setEditNickname(data.nickname)
-    setEditSignature(data.signature)
-    setEditGender(data.gender || '')
+    try {
+      const data = await apiFetchJson('/api/users/me')
+      setUser(data)
+      setEditNickname(data.nickname)
+      setEditSignature(data.signature)
+      setEditGender(data.gender || '')
+    } catch {}
   }
 
   const fetchContacts = async () => {
-    const res = await apiFetch('/api/contacts')
-    setContacts(await res.json())
+    try { setContacts(await apiFetchJson('/api/contacts')) } catch {}
   }
 
   useEffect(() => { fetchUser(); fetchContacts() }, [])
 
+  useEffect(() => {
+    if (emailCountdown <= 0) return
+    const timer = setTimeout(() => setEmailCountdown(emailCountdown - 1), 1000)
+    return () => clearTimeout(timer)
+  }, [emailCountdown])
+
   const saveProfile = async () => {
-    const res = await apiFetch('/api/users/me', {
-      method: 'PUT',
-      body: JSON.stringify({ nickname: editNickname, signature: editSignature, gender: editGender }),
-    })
-    if (!res.ok) {
-      const data = await res.json()
-      setMsg(data.error || '保存失败')
-      setTimeout(() => setMsg(''), 2000)
-      return
+    try {
+      await apiFetchJson('/api/users/me', {
+        method: 'PUT',
+        body: JSON.stringify({ nickname: editNickname, signature: editSignature, gender: editGender }),
+      })
+      setEditing(false)
+      fetchUser()
+      setMsg('保存成功')
+    } catch (e) {
+      setMsg(e.message || '保存失败')
     }
-    setEditing(false)
-    fetchUser()
-    setMsg('保存成功')
     setTimeout(() => setMsg(''), 2000)
   }
 
@@ -121,8 +133,7 @@ export default function ProfilePage({ onLogout }) {
     try {
       const formData = new FormData()
       formData.append('avatar', file)
-      const res = await apiFetch('/api/users/me/avatar', { method: 'POST', body: formData })
-      if (!res.ok) throw new Error('头像上传失败')
+      await apiFetchJson('/api/users/me/avatar', { method: 'POST', body: formData })
       fetchUser()
       setMsg('头像已更新')
       setTimeout(() => setMsg(''), 2000)
@@ -148,53 +159,113 @@ export default function ProfilePage({ onLogout }) {
       setPasswordError('两次输入的新密码不一致')
       return
     }
-    const res = await apiFetch('/api/users/me/change-password', {
-      method: 'POST',
-      body: JSON.stringify({ oldPassword, newPassword }),
-    })
-    const data = await res.json()
-    if (!res.ok) {
-      setPasswordError(data.error || '修改失败')
-      return
+    try {
+      await apiFetchJson('/api/users/me/change-password', {
+        method: 'POST',
+        body: JSON.stringify({ oldPassword, newPassword }),
+      })
+      setShowChangePassword(false)
+      setOldPassword('')
+      setNewPassword('')
+      setConfirmPassword('')
+      setMsg('密码修改成功')
+      setTimeout(() => setMsg(''), 2000)
+    } catch (e) {
+      setPasswordError(e.message || '修改失败')
     }
-    setShowChangePassword(false)
-    setOldPassword('')
-    setNewPassword('')
-    setConfirmPassword('')
-    setMsg('密码修改成功')
-    setTimeout(() => setMsg(''), 2000)
+  }
+
+  const maskEmail = (email) => {
+    if (!email) return ''
+    const [local, domain] = email.split('@')
+    if (local.length <= 1) return `*@${domain}`
+    return `${local[0]}${'*'.repeat(Math.min(local.length - 1, 3))}@${domain}`
+  }
+
+  const handleSendEmailCode = async () => {
+    setEmailError('')
+    if (!newEmail.trim() || emailSending) return
+    setEmailSending(true)
+    try {
+      const data = await apiFetchJson('/api/auth/send-code', {
+        method: 'POST',
+        body: JSON.stringify({ email: newEmail.trim(), type: 'bind' }),
+      })
+      if (data.success) {
+        setEmailCountdown(60)
+      } else {
+        setEmailError(data.error || '发送失败')
+      }
+    } catch (e) {
+      setEmailError(e.message || '网络错误，请重试')
+    } finally {
+      setEmailSending(false)
+    }
+  }
+
+  const handleBindEmail = async () => {
+    setEmailError('')
+    if (!newEmail.trim()) { setEmailError('请输入邮箱地址'); return }
+    if (!emailCode) { setEmailError('请输入验证码'); return }
+    try {
+      const data = await apiFetchJson('/api/auth/bind-email', {
+        method: 'POST',
+        body: JSON.stringify({ email: newEmail.trim(), code: emailCode }),
+      })
+      if (data.success) {
+        setShowChangeEmail(false)
+        setNewEmail('')
+        setEmailCode('')
+        setEmailCountdown(0)
+        fetchUser()
+        setMsg('邮箱绑定成功')
+        setTimeout(() => setMsg(''), 2000)
+      } else {
+        setEmailError(data.error || '绑定失败')
+      }
+    } catch (e) {
+      setEmailError(e.message || '网络错误，请重试')
+    }
   }
 
   const addContact = async ({ name, notifyMethod, notifyTarget }) => {
-    const res = await apiFetch('/api/contacts', {
-      method: 'POST',
-      body: JSON.stringify({ name, notifyMethod, notifyTarget }),
-    })
-    const data = await res.json()
-    if (data.success) {
-      setShowAddContact(false)
-      fetchContacts()
-      setMsg('联系人已添加')
+    try {
+      const data = await apiFetchJson('/api/contacts', {
+        method: 'POST',
+        body: JSON.stringify({ name, notifyMethod, notifyTarget }),
+      })
+      if (data.success) {
+        setShowAddContact(false)
+        fetchContacts()
+        setMsg('联系人已添加')
+        setTimeout(() => setMsg(''), 2000)
+      }
+    } catch (e) {
+      setMsg(e.message || '添加失败')
       setTimeout(() => setMsg(''), 2000)
     }
   }
 
   const updateContact = async ({ name, notifyMethod, notifyTarget }) => {
-    const res = await apiFetch(`/api/contacts/${editingContact.id}`, {
-      method: 'PUT',
-      body: JSON.stringify({ name, notifyMethod, notifyTarget }),
-    })
-    const data = await res.json()
-    if (data.success) {
-      setEditingContact(null)
-      fetchContacts()
-      setMsg('联系人已更新')
+    try {
+      const data = await apiFetchJson(`/api/contacts/${editingContact.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ name, notifyMethod, notifyTarget }),
+      })
+      if (data.success) {
+        setEditingContact(null)
+        fetchContacts()
+        setMsg('联系人已更新')
+        setTimeout(() => setMsg(''), 2000)
+      }
+    } catch (e) {
+      setMsg(e.message || '更新失败')
       setTimeout(() => setMsg(''), 2000)
     }
   }
 
   const deleteContact = async (id) => {
-    await apiFetch(`/api/contacts/${id}`, { method: 'DELETE' })
+    try { await apiFetchJson(`/api/contacts/${id}`, { method: 'DELETE' }) } catch {}
     fetchContacts()
     setMsg('联系人已删除')
     setTimeout(() => setMsg(''), 2000)
@@ -255,6 +326,59 @@ export default function ProfilePage({ onLogout }) {
             <p className="signature">{user.signature || '暂无签名'}</p>
             {user.gender && <p className="profile-gender">{user.gender}</p>}
             <button className="btn" onClick={() => setEditing(true)}>编辑资料</button>
+          </div>
+        )}
+      </div>
+
+      <div className="card">
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <h3 style={{ fontSize: 16, color: 'var(--text-2)', margin: 0 }}>绑定邮箱</h3>
+          {!showChangeEmail && (
+            <button className="btn btn-sm" onClick={() => setShowChangeEmail(true)}>
+              {user.email ? '更换' : '绑定'}
+            </button>
+          )}
+        </div>
+        {user.email ? (
+          <div style={{ marginTop: 8 }}>
+            <span style={{ color: 'var(--text-1)' }}>{maskEmail(user.email)}</span>
+            {user.email_verified ? (
+              <span style={{ marginLeft: 8, color: '#27ae60', fontSize: 13 }}>已验证</span>
+            ) : (
+              <span style={{ marginLeft: 8, color: '#e74c3c', fontSize: 13 }}>未验证</span>
+            )}
+          </div>
+        ) : (
+          <p style={{ marginTop: 8, color: 'var(--text-3)', fontSize: 13 }}>未绑定邮箱</p>
+        )}
+        {showChangeEmail && (
+          <div className="password-form">
+            <input
+              type="email"
+              placeholder="新邮箱地址"
+              value={newEmail}
+              onChange={e => { setNewEmail(e.target.value); setEmailError('') }}
+            />
+            <input
+              placeholder="验证码（6位数字）"
+              value={emailCode}
+              onChange={e => { setEmailCode(e.target.value); setEmailError('') }}
+              maxLength={6}
+            />
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              style={{ width: '100%' }}
+              onClick={handleSendEmailCode}
+              disabled={emailSending || emailCountdown > 0 || !newEmail.trim()}
+            >
+              {emailSending ? '发送中...' : emailCountdown > 0 ? `${emailCountdown}s后重新发送` : '发送验证码'}
+            </button>
+            {emailError && <div className="modal-error">{emailError}</div>}
+            <div className="btn-row">
+              <button className="btn btn-primary" onClick={handleBindEmail}>确认绑定</button>
+              <button className="btn" onClick={() => { setShowChangeEmail(false); setNewEmail(''); setEmailCode(''); setEmailCountdown(0); setEmailError('') }}>取消</button>
+            </div>
           </div>
         )}
       </div>

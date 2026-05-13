@@ -18,6 +18,11 @@ function throttledSave() {
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(save, 500);
 }
+// 立即同步保存，用于关键写入
+throttledSave.sync = function () {
+  if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+  save();
+};
 
 async function initDb() {
   const SQL = await initSqlJs();
@@ -157,6 +162,33 @@ async function initDb() {
   try {
     db.run("ALTER TABLE users ADD COLUMN gender TEXT DEFAULT ''");
   } catch (e) { /* column already exists */ }
+
+  // Migrate: add email and email_verified to users
+  try {
+    db.run("ALTER TABLE users ADD COLUMN email TEXT DEFAULT NULL");
+  } catch (e) { /* column already exists */ }
+  try {
+    db.run("ALTER TABLE users ADD COLUMN email_verified INTEGER DEFAULT 0");
+  } catch (e) { /* column already exists */ }
+
+  // Email verification codes table
+  db.run(`
+    CREATE TABLE IF NOT EXISTS email_verification_codes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      email TEXT NOT NULL,
+      code TEXT NOT NULL,
+      type TEXT NOT NULL,
+      user_id INTEGER,
+      attempts INTEGER DEFAULT 0,
+      expires_at TEXT NOT NULL,
+      created_at TEXT DEFAULT (datetime('now'))
+    )
+  `);
+
+  // Unique index on email (NULL values excluded)
+  try {
+    db.run("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE email IS NOT NULL");
+  } catch (e) { /* index already exists */ }
 
   // 初始化：将 checkin_interval_days 复制到 alert_interval_days，alert_started_at 复制自 last_checkin_at
   function queryAll(query, params = []) {

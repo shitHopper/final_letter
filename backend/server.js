@@ -47,7 +47,7 @@ function getCookieOptions(req) {
     httpOnly: true,
     sameSite: isSecure ? "none" : "lax",
     secure: isSecure,
-    maxAge: 7 * 24 * 60 * 60 * 1000,
+    maxAge: 3 * 24 * 60 * 60 * 1000,
     path: "/",
   };
 }
@@ -114,7 +114,7 @@ const upload = multer({
 });
 
 let db, saveDb;
-let all, run, get, runTransaction;
+let all, run, runCritical, get, runTransaction;
 
 function escapeHtml(str) {
   if (typeof str !== 'string') return str;
@@ -185,15 +185,28 @@ function verifyPassword(password, stored) {
   if (!stored) return false;
   const [salt, key] = stored.split(":");
   const derived = crypto.scryptSync(password, salt, 64).toString("hex");
-  return derived === key;
+  if (derived.length !== key.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(derived), Buffer.from(key));
 }
 
 // ========== 信件验证 token ==========
 
-const LETTER_VERIFY_TOKENS = new Map(); // letterId -> { expiresAt }
+const LETTER_VERIFY_TOKENS = new Map(); // letterId -> { token, expiresAt }
 const VERIFY_TOKEN_TTL = 5 * 60 * 1000; // 5分钟有效
+const VERIFY_TOKEN_MAX = 1000;
 
 function issueVerifyToken(letterId) {
+  // 容量保护：超过上限时清理过期条目，仍超限则淘汰最旧
+  if (LETTER_VERIFY_TOKENS.size >= VERIFY_TOKEN_MAX) {
+    const now = Date.now();
+    for (const [id, entry] of LETTER_VERIFY_TOKENS) {
+      if (now > entry.expiresAt) LETTER_VERIFY_TOKENS.delete(id);
+    }
+    if (LETTER_VERIFY_TOKENS.size >= VERIFY_TOKEN_MAX) {
+      const oldestKey = LETTER_VERIFY_TOKENS.keys().next().value;
+      LETTER_VERIFY_TOKENS.delete(oldestKey);
+    }
+  }
   const token = crypto.randomBytes(32).toString("hex");
   LETTER_VERIFY_TOKENS.set(letterId, { token, expiresAt: Date.now() + VERIFY_TOKEN_TTL });
   return token;
@@ -221,43 +234,204 @@ setInterval(() => {
 // 托管前端文件夹，访问域名直接打开网页
 app.use(express.static(path.join(__dirname, '../frontend/dist')));
 
+// ========== 邮箱验证码工具 ==========
+
+function generateVerificationCode() {
+  return String(Math.floor(100000 + Math.random() * 900000));
+}
+
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+function maskEmail(email) {
+  if (!email) return '';
+  const [local, domain] = email.split('@');
+  if (local.length <= 1) return `*@${domain}`;
+  return `${local[0]}${'*'.repeat(Math.min(local.length - 1, 3))}@${domain}`;
+}
+
+function checkSendRateLimit(email, type) {
+  const recent = get(
+    "SELECT created_at FROM email_verification_codes WHERE email = ? AND type = ? ORDER BY created_at DESC LIMIT 1",
+    [email, type]
+  );
+  if (recent && Date.now() - new Date(recent.created_at).getTime() < 60 * 1000) {
+    return false;
+  }
+  const todayStart = new Date().toISOString().slice(0, 10) + 'T00:00:00.000Z';
+  const dailyCount = get(
+    "SELECT COUNT(*) as cnt FROM email_verification_codes WHERE email = ? AND created_at >= ?",
+    [email, todayStart]
+  );
+  if (dailyCount && dailyCount.cnt >= 10) {
+    return false;
+  }
+  return true;
+}
+
+const VERIFY_CODE_TTL = 5 * 60 * 1000; // 5分钟
+
+function sendCodeEmailTemplate(code, type) {
+  const typeLabel = type === 'register' ? '注册' : type === 'bind' ? '绑定邮箱' : '重置密码';
+  return `<div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:20px;">
+    <h2 style="color:#6c5ce7;">「绝笔信」验证码</h2>
+    <p>您正在进行<strong>${typeLabel}</strong>操作，验证码为：</p>
+    <div style="background:#f8f9fa;border-radius:12px;padding:16px;margin:16px 0;text-align:center;">
+      <span style="font-size:32px;font-weight:bold;letter-spacing:8px;color:#6c5ce7;">${escapeHtml(code)}</span>
+    </div>
+    <p style="color:#636e72;font-size:14px;">验证码5分钟内有效，请勿泄露给他人。</p>
+    <p style="color:#636e72;font-size:12px;">如非本人操作，请忽略此邮件。</p>
+  </div>`;
+}
+
+app.post("/api/auth/send-code", authLimiter, async (req, res) => {
+  const { email, type } = req.body;
+  if (!email || !isValidEmail(email.trim()))
+    return res.status(400).json({ error: "请输入有效的邮箱地址" });
+  const trimmedEmail = email.trim().toLowerCase();
+  const validTypes = ['register', 'bind', 'reset_password'];
+  if (!type || !validTypes.includes(type))
+    return res.status(400).json({ error: "无效的验证码类型" });
+
+  if (type === 'register') {
+    const existing = get("SELECT id FROM users WHERE email = ? AND email_verified = 1", [trimmedEmail]);
+    if (existing) return res.status(400).json({ error: "该邮箱已被注册" });
+  } else if (type === 'bind') {
+    const existing = get("SELECT id FROM users WHERE email = ? AND email_verified = 1", [trimmedEmail]);
+    if (existing) return res.status(400).json({ error: "该邮箱已被其他账号绑定" });
+  } else if (type === 'reset_password') {
+    const existing = get("SELECT id FROM users WHERE email = ? AND email_verified = 1", [trimmedEmail]);
+    if (!existing) return res.status(400).json({ error: "该邮箱未注册或未验证" });
+  }
+
+  if (!checkSendRateLimit(trimmedEmail, type))
+    return res.status(429).json({ error: "发送过于频繁，请稍后再试" });
+
+  // 删除该 email+type 的旧验证码
+  run("DELETE FROM email_verification_codes WHERE email = ? AND type = ?", [trimmedEmail, type]);
+
+  const code = generateVerificationCode();
+  const expiresAt = new Date(Date.now() + VERIFY_CODE_TTL).toISOString();
+  run("INSERT INTO email_verification_codes (email, code, type, expires_at) VALUES (?, ?, ?, ?)",
+    [trimmedEmail, code, type, expiresAt]);
+
+  const subject = type === 'reset_password' ? '绝笔信 - 密码重置验证码' : '绝笔信 - 验证码';
+  // 先返回响应，再异步发送邮件（避免 SMTP 慢导致请求超时）
+  res.json({ success: true, email: trimmedEmail });
+  sendEmail(trimmedEmail, subject, sendCodeEmailTemplate(code, type)).catch(err => {
+    console.error(`[邮件-异步发送失败] 收件人: ${trimmedEmail}, 错误: ${err.message}`);
+  });
+});
+
+function verifyCode(email, code, type) {
+  // 查找未过期且匹配的验证码
+  const record = get(
+    "SELECT * FROM email_verification_codes WHERE email = ? AND type = ? AND expires_at > datetime('now') ORDER BY created_at DESC LIMIT 1",
+    [email, type]
+  );
+  if (!record) {
+    return { valid: false, error: "验证码错误或已过期，请重新发送" };
+  }
+
+  if (record.code !== code) {
+    const newAttempts = (record.attempts || 0) + 1;
+    if (newAttempts >= 5) {
+      // 5次失败，删除验证码
+      run("DELETE FROM email_verification_codes WHERE id = ?", [record.id]);
+      return { valid: false, error: "验证码错误次数过多，请重新发送验证码" };
+    }
+    run("UPDATE email_verification_codes SET attempts = ? WHERE id = ?", [newAttempts, record.id]);
+    return { valid: false, error: "验证码错误" };
+  }
+
+  // 验证成功，删除验证码（一次性使用）
+  run("DELETE FROM email_verification_codes WHERE id = ?", [record.id]);
+  return { valid: true, record };
+}
+
 // ========== 认证模块 ==========
 
-app.post("/api/auth/register", authLimiter, (req, res) => {
-  const { nickname, password } = req.body;
+app.post("/api/auth/register", authLimiter, async (req, res) => {
+  const { nickname, password, email } = req.body;
+  if (!email || !isValidEmail(email.trim()))
+    return res.status(400).json({ error: "请输入有效的邮箱地址" });
   if (!nickname || !nickname.trim())
     return res.status(400).json({ error: "请输入昵称" });
   if (!password || password.length < 4)
     return res.status(400).json({ error: "密码至少4位" });
+  const trimmedEmail = email.trim().toLowerCase();
   const existing = get("SELECT * FROM users WHERE nickname = ?", [nickname.trim()]);
   if (existing)
     return res.status(400).json({ error: "注册失败，请尝试其他昵称" });
+  const existingEmail = get("SELECT id FROM users WHERE email = ? AND email_verified = 1", [trimmedEmail]);
+  if (existingEmail)
+    return res.status(400).json({ error: "该邮箱已被注册" });
+
+  // 删除该 email+type 的旧验证码
+  run("DELETE FROM email_verification_codes WHERE email = ? AND type = 'register'", [trimmedEmail]);
+
+  const code = generateVerificationCode();
+  const expiresAt = new Date(Date.now() + VERIFY_CODE_TTL).toISOString();
+  run("INSERT INTO email_verification_codes (email, code, type, expires_at) VALUES (?, ?, 'register', ?)",
+    [trimmedEmail, code, expiresAt]);
+
+  // 先返回响应，再异步发送邮件
+  res.json({ needVerifyEmail: true, email: trimmedEmail });
+  sendEmail(trimmedEmail, '绝笔信 - 注册验证码', sendCodeEmailTemplate(code, 'register')).catch(err => {
+    console.error(`[邮件-异步发送失败] 收件人: ${trimmedEmail}, 错误: ${err.message}`);
+  });
+});
+
+app.post("/api/auth/register/verify", authLimiter, (req, res) => {
+  const { email, code, nickname, password } = req.body;
+  if (!email || !code || !nickname || !password)
+    return res.status(400).json({ error: "缺少必填字段" });
+  if (password.length < 4)
+    return res.status(400).json({ error: "密码至少4位" });
+  const trimmedEmail = email.trim().toLowerCase();
+
+  const result = verifyCode(trimmedEmail, code, 'register');
+  if (!result.valid)
+    return res.status(400).json({ error: result.error });
+
+  // 再次检查昵称唯一性
+  const existing = get("SELECT id FROM users WHERE nickname = ?", [nickname.trim()]);
+  if (existing)
+    return res.status(400).json({ error: "注册失败，请尝试其他昵称" });
+
   const hashed = hashPassword(password);
-  run("INSERT INTO users (nickname, password, signature, checkin_interval_days, last_checkin_at, alert_interval_days, push_interval_days, status, alert_started_at) VALUES (?, ?, '', 3, ?, 3, 3, 'alert', ?)",
-    [nickname.trim(), hashed, new Date().toISOString(), new Date().toISOString()]);
-  const user = get("SELECT * FROM users WHERE nickname = ?", [nickname.trim()]);
-  const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: "7d" });
+  const now = new Date().toISOString();
+  run("INSERT INTO users (nickname, password, email, email_verified, signature, checkin_interval_days, last_checkin_at, alert_interval_days, push_interval_days, status, alert_started_at) VALUES (?, ?, ?, 1, '', 3, ?, 3, 3, 'alert', ?)",
+    [nickname.trim(), hashed, trimmedEmail, now, now]);
+  const user = get("SELECT * FROM users WHERE email = ? AND email_verified = 1", [trimmedEmail]);
+  const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: "3d" });
   res.cookie("token", token, getCookieOptions(req));
   res.json({ token, user: { id: user.id, nickname: user.nickname } });
 });
 
 app.post("/api/auth/login", authLimiter, (req, res) => {
-  const { nickname, password } = req.body;
-  if (!nickname || !nickname.trim())
-    return res.status(400).json({ error: "请输入昵称" });
+  const { account, nickname, password } = req.body;
+  const accountValue = (account || nickname || '').trim();
+  if (!accountValue)
+    return res.status(400).json({ error: "请输入账号" });
   if (!password)
     return res.status(400).json({ error: "请输入密码" });
-  const user = get("SELECT * FROM users WHERE nickname = ?", [nickname.trim()]);
+  // 先按昵称查，再按邮箱查
+  let user = get("SELECT * FROM users WHERE nickname = ?", [accountValue]);
+  if (!user) {
+    user = get("SELECT * FROM users WHERE email = ? AND email_verified = 1", [accountValue.toLowerCase()]);
+  }
   if (!user)
-    return res.status(401).json({ error: "昵称或密码错误" });
+    return res.status(401).json({ error: "账号或密码错误" });
   if (!user.password) {
     return res.status(403).json({ error: "账号需要设置密码后才能登录", needSetPassword: true });
   }
   if (!verifyPassword(password, user.password))
-    return res.status(401).json({ error: "昵称或密码错误" });
-  const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: "7d" });
+    return res.status(401).json({ error: "账号或密码错误" });
+  const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: "3d" });
   res.cookie("token", token, getCookieOptions(req));
-  res.json({ token, user: { id: user.id, nickname: user.nickname, forceReset: !!user.force_reset } });
+  res.json({ token, user: { id: user.id, nickname: user.nickname, forceReset: !!user.force_reset, needBindEmail: !user.email } });
 });
 
 app.get("/api/auth/me", auth, (req, res) => {
@@ -265,6 +439,8 @@ app.get("/api/auth/me", auth, (req, res) => {
   if (!user) return res.status(404).json({ error: "用户不存在" });
   const safe = stripPassword(user);
   safe.forceReset = !!user.force_reset;
+  safe.emailVerified = !!user.email_verified;
+  safe.needBindEmail = !user.email;
   res.json(safe);
 });
 
@@ -273,12 +449,79 @@ app.post("/api/auth/logout", (req, res) => {
   res.json({ success: true });
 });
 
+app.post("/api/auth/bind-email", auth, (req, res) => {
+  const { email, code } = req.body;
+  if (!email || !isValidEmail(email.trim()))
+    return res.status(400).json({ error: "请输入有效的邮箱地址" });
+  if (!code)
+    return res.status(400).json({ error: "请输入验证码" });
+  const trimmedEmail = email.trim().toLowerCase();
+
+  const result = verifyCode(trimmedEmail, code, 'bind');
+  if (!result.valid)
+    return res.status(400).json({ error: result.error });
+
+  // 再次检查邮箱未被其他账号使用
+  const existing = get("SELECT id FROM users WHERE email = ? AND email_verified = 1 AND id != ?", [trimmedEmail, req.user.id]);
+  if (existing)
+    return res.status(400).json({ error: "该邮箱已被其他账号绑定" });
+
+  run("UPDATE users SET email = ?, email_verified = 1 WHERE id = ?", [trimmedEmail, req.user.id]);
+  res.json({ success: true, email: trimmedEmail });
+});
+
 app.post("/api/auth/set-password", auth, (req, res) => {
   const { password } = req.body;
   if (!password || password.length < 4)
     return res.status(400).json({ error: "密码至少4位" });
   const hashed = hashPassword(password);
   run("UPDATE users SET password = ?, force_reset = 0 WHERE id = ?", [hashed, req.user.id]);
+  res.json({ success: true });
+});
+
+app.post("/api/auth/reset-password-request", passwordChangeLimiter, async (req, res) => {
+  const { email } = req.body;
+  if (!email || !isValidEmail(email.trim()))
+    return res.status(400).json({ error: "请输入有效的邮箱地址" });
+  const trimmedEmail = email.trim().toLowerCase();
+  const user = get("SELECT id FROM users WHERE email = ? AND email_verified = 1", [trimmedEmail]);
+  if (!user)
+    return res.status(400).json({ error: "该邮箱未注册或未验证" });
+
+  if (!checkSendRateLimit(trimmedEmail, 'reset_password'))
+    return res.status(429).json({ error: "发送过于频繁，请稍后再试" });
+
+  run("DELETE FROM email_verification_codes WHERE email = ? AND type = 'reset_password'", [trimmedEmail]);
+  const code = generateVerificationCode();
+  const expiresAt = new Date(Date.now() + VERIFY_CODE_TTL).toISOString();
+  run("INSERT INTO email_verification_codes (email, code, type, user_id, expires_at) VALUES (?, ?, 'reset_password', ?, ?)",
+    [trimmedEmail, code, user.id, expiresAt]);
+
+  // 先返回响应，再异步发送邮件
+  res.json({ success: true });
+  sendEmail(trimmedEmail, '绝笔信 - 密码重置验证码', sendCodeEmailTemplate(code, 'reset_password')).catch(err => {
+    console.error(`[邮件-异步发送失败] 收件人: ${trimmedEmail}, 错误: ${err.message}`);
+  });
+});
+
+app.post("/api/auth/reset-password", passwordChangeLimiter, (req, res) => {
+  const { email, code, newPassword } = req.body;
+  if (!email || !code || !newPassword)
+    return res.status(400).json({ error: "缺少必填字段" });
+  if (newPassword.length < 4)
+    return res.status(400).json({ error: "密码至少4位" });
+  const trimmedEmail = email.trim().toLowerCase();
+
+  const result = verifyCode(trimmedEmail, code, 'reset_password');
+  if (!result.valid)
+    return res.status(400).json({ error: result.error });
+
+  const user = get("SELECT id FROM users WHERE email = ? AND email_verified = 1", [trimmedEmail]);
+  if (!user)
+    return res.status(400).json({ error: "该邮箱未注册或未验证" });
+
+  const hashed = hashPassword(newPassword);
+  run("UPDATE users SET password = ?, force_reset = 0 WHERE id = ?", [hashed, user.id]);
   res.json({ success: true });
 });
 
@@ -318,12 +561,21 @@ app.get("/api/checkin", auth, (req, res) => {
 });
 
 app.post("/api/checkin", auth, (req, res) => {
-  const user = get("SELECT * FROM users WHERE id = ?", [req.user.id]);
   const now = new Date().toISOString();
-  const prevStatus = user.status || 'alert';
+  let prevStatus;
+  let modified;
 
-  // 使用 WHERE 条件防止覆盖调度器已更新的状态
-  run("UPDATE users SET last_checkin_at = ?, alert_started_at = ?, push_started_at = NULL, status = 'alert' WHERE id = ? AND status IN ('alert', 'push')", [now, now, req.user.id]);
+  // 事务保护：读状态 + 更新原子操作，防止调度器竞态覆盖；critical 立即持久化
+  runTransaction(() => {
+    const user = get("SELECT status FROM users WHERE id = ?", [req.user.id]);
+    prevStatus = user?.status || 'alert';
+    db.run("UPDATE users SET last_checkin_at = ?, alert_started_at = ?, push_started_at = NULL, status = 'alert' WHERE id = ? AND status IN ('alert', 'push')", [now, now, req.user.id]);
+    modified = db.getRowsModified();
+  }, { critical: true });
+
+  if (!modified) {
+    return res.status(409).json({ error: "打卡失败，状态可能已变更，请刷新重试" });
+  }
 
   const contacts = all("SELECT id FROM contacts WHERE user_id = ?", [req.user.id]);
 
@@ -408,7 +660,7 @@ app.post("/api/letters", auth, (req, res) => {
   if (method !== 4 && !pushTarget)
     return res.status(400).json({ error: "缺少推送目标" });
   const hashedLetterPw = password ? hashPassword(password) : null;
-  run(
+  runCritical(
     "INSERT INTO letters (user_id, title, content, push_method, push_target, password) VALUES (?, ?, ?, ?, ?, ?)",
     [req.user.id, title, content, method, pushTarget || '', hashedLetterPw]
   );
@@ -428,7 +680,7 @@ app.put("/api/letters/:id", auth, (req, res) => {
   if (!Number.isInteger(method) || method < 1 || method > 4)
     return res.status(400).json({ error: "无效的推送方式" });
   const newPw = password !== undefined ? (password ? hashPassword(password) : null) : letter.password;
-  run(
+  runCritical(
     "UPDATE letters SET title = ?, content = ?, push_method = ?, push_target = ?, password = ?, updated_at = datetime('now') WHERE id = ?",
     [title, content, method, pushTarget, newPw, req.params.id]
   );
@@ -470,7 +722,7 @@ app.delete("/api/letters/:id", auth, (req, res) => {
   if (!letter) return res.status(404).json({ error: "信件不存在" });
   if (letter.user_id !== req.user.id)
     return res.status(403).json({ error: "无权删除他人信件" });
-  run("DELETE FROM letters WHERE id = ?", [req.params.id]);
+  runCritical("DELETE FROM letters WHERE id = ?", [req.params.id]);
   res.json({ success: true });
 });
 
@@ -754,6 +1006,7 @@ initDb().then(({ db: _db, save }) => {
   const helpers = createHelpers(db, saveDb);
   all = helpers.all;
   run = helpers.run;
+  runCritical = helpers.runCritical;
   get = helpers.get;
   runTransaction = helpers.runTransaction;
   startScheduler(db, saveDb);
