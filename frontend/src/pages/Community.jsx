@@ -12,6 +12,7 @@ export default function CommunityPage({ userId }) {
   const [replyTo, setReplyTo] = useState(null)
   const [uploading, setUploading] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(null)
+  const [alertModal, setAlertModal] = useState(null)
   const [viewingUser, setViewingUser] = useState(null)
   const [userCardPos, setUserCardPos] = useState({ x: 0, y: 0 })
   const fileInputRef = useRef(null)
@@ -70,6 +71,10 @@ export default function CommunityPage({ userId }) {
 
   const createPost = async () => {
     if (!newPost.trim() && newImages.length === 0) return
+    if (newPost.length > 1000) {
+      setAlertModal('帖子内容最多1000个字符')
+      return
+    }
     setUploading(true)
     try {
       let imageUrls = []
@@ -128,6 +133,10 @@ export default function CommunityPage({ userId }) {
 
   const addComment = async (postId) => {
     if (!newComment.trim()) return
+    if (newComment.length > 300) {
+      setAlertModal('评论最多300个字符')
+      return
+    }
     const payload = { content: newComment }
     if (replyTo) {
       payload.replyToId = replyTo.id
@@ -365,6 +374,18 @@ export default function CommunityPage({ userId }) {
                 else deleteComment(confirmDelete.id, confirmDelete.postId)
               }}>确认删除</button>
               <button className="btn" onClick={() => setConfirmDelete(null)}>取消</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {alertModal && (
+        <div className="modal-overlay" onClick={() => setAlertModal(null)}>
+          <div className="modal-content" onClick={e => e.stopPropagation()}>
+            <h3>提示</h3>
+            <p className="modal-hint">{alertModal}</p>
+            <div className="btn-row" style={{ marginTop: 16 }}>
+              <button className="btn btn-primary" onClick={() => setAlertModal(null)}>确定</button>
             </div>
           </div>
         </div>

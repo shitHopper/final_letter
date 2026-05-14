@@ -176,6 +176,11 @@ async function initDb() {
     db.run("ALTER TABLE users ADD COLUMN token_version INTEGER DEFAULT 0");
   } catch (e) { /* column already exists */ }
 
+  // Migrate: add real_name to users for emergency contact identity
+  try {
+    db.run("ALTER TABLE users ADD COLUMN real_name TEXT DEFAULT ''");
+  } catch (e) { /* column already exists */ }
+
   // Email verification codes table
   db.run(`
     CREATE TABLE IF NOT EXISTS email_verification_codes (
@@ -241,8 +246,8 @@ async function initDb() {
   if (rows[0].values[0][0] === 0) {
     const now = new Date().toISOString();
     db.run(
-      "INSERT INTO users (nickname, signature, checkin_interval_days, last_checkin_at, alert_interval_days, push_interval_days, status, alert_started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-      ["小明", "好好生活", 3, now, 3, 3, 'alert', now]
+      "INSERT INTO users (nickname, signature, last_checkin_at, alert_interval_days, push_interval_days, status, alert_started_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      ["小明", "好好生活", now, 3, 3, 'alert', now]
     );
   }
 

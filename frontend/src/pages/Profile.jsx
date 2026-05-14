@@ -61,10 +61,13 @@ export default function ProfilePage({ onLogout }) {
   const [editNickname, setEditNickname] = useState('')
   const [editSignature, setEditSignature] = useState('')
   const [editGender, setEditGender] = useState('')
+  const [editRealName, setEditRealName] = useState('')
   const [msg, setMsg] = useState('')
   const [contacts, setContacts] = useState([])
   const [showAddContact, setShowAddContact] = useState(false)
   const [editingContact, setEditingContact] = useState(null)
+  const [confirmDeleteContact, setConfirmDeleteContact] = useState(null)
+  const [alertModal, setAlertModal] = useState(null)
 
   // Avatar upload
   const [uploadingAvatar, setUploadingAvatar] = useState(false)
@@ -92,6 +95,7 @@ export default function ProfilePage({ onLogout }) {
       setEditNickname(data.nickname)
       setEditSignature(data.signature)
       setEditGender(data.gender || '')
+      setEditRealName(data.real_name || '')
     } catch (e) { console.error('获取用户信息失败:', e) }
   }
 
@@ -111,7 +115,7 @@ export default function ProfilePage({ onLogout }) {
     try {
       await apiFetchJson('/api/users/me', {
         method: 'PUT',
-        body: JSON.stringify({ nickname: editNickname, signature: editSignature, gender: editGender }),
+        body: JSON.stringify({ nickname: editNickname, signature: editSignature, gender: editGender, realName: editRealName }),
       })
       setEditing(false)
       fetchUser()
@@ -160,8 +164,8 @@ export default function ProfilePage({ onLogout }) {
       setPasswordError('请填写旧密码和新密码')
       return
     }
-    if (newPassword.length < 4) {
-      setPasswordError('新密码至少4位')
+    if (newPassword.length < 8) {
+      setPasswordError('新密码至少8位')
       return
     }
     if (newPassword.length > 16) {
@@ -242,6 +246,10 @@ export default function ProfilePage({ onLogout }) {
   }
 
   const addContact = async ({ name, notifyMethod, notifyTarget }) => {
+    if (contacts.length >= 8) {
+      setAlertModal('最多添加8个紧急联系人')
+      return
+    }
     try {
       const data = await apiFetchJson('/api/contacts', {
         method: 'POST',
@@ -316,6 +324,12 @@ export default function ProfilePage({ onLogout }) {
               onChange={e => setEditNickname(e.target.value)}
             />
             <input
+              placeholder="真实姓名（用于求救信声明身份，可用假名）"
+              value={editRealName}
+              onChange={e => setEditRealName(e.target.value)}
+              maxLength={50}
+            />
+            <input
               placeholder="个性签名"
               value={editSignature}
               onChange={e => setEditSignature(e.target.value)}
@@ -330,12 +344,13 @@ export default function ProfilePage({ onLogout }) {
             </div>
             <div className="btn-row">
               <button className="btn btn-primary" onClick={saveProfile}>保存</button>
-              <button className="btn" onClick={() => { setEditing(false); setEditNickname(user.nickname); setEditSignature(user.signature); setEditGender(user.gender || '') }}>取消</button>
+              <button className="btn" onClick={() => { setEditing(false); setEditNickname(user.nickname); setEditSignature(user.signature); setEditGender(user.gender || ''); setEditRealName(user.real_name || '') }}>取消</button>
             </div>
           </div>
         ) : (
           <div className="profile-info">
             <h2>{user.nickname}</h2>
+            {user.real_name && <p className="profile-realname">{user.real_name}</p>}
             <p className="signature">{user.signature || '暂无签名'}</p>
             {user.gender && <p className="profile-gender">{user.gender}</p>}
             <button className="btn" onClick={() => setEditing(true)}>编辑资料</button>
@@ -413,7 +428,7 @@ export default function ProfilePage({ onLogout }) {
             />
             <input
               type="password"
-              placeholder="新密码（4-16位）"
+              placeholder="新密码（8-16位）"
               value={newPassword}
               onChange={e => { setNewPassword(e.target.value); setPasswordError('') }}
               maxLength={16}
@@ -444,7 +459,7 @@ export default function ProfilePage({ onLogout }) {
         </div>
         <div className="stat-row">
           <span>预警期限</span>
-          <span>{user.alert_interval_days || user.checkin_interval_days} 天</span>
+          <span>{user.alert_interval_days} 天</span>
         </div>
         <div className="stat-row">
           <span>推送期限</span>
@@ -456,7 +471,7 @@ export default function ProfilePage({ onLogout }) {
         </div>
         <div className="stat-row">
           <span>注册时间</span>
-          <span>{parseUTC(user.created_at).toLocaleDateString()}</span>
+          <span>{parseUTC(user.created_at)?.toLocaleDateString() || ''}</span>
         </div>
       </div>
 
@@ -501,7 +516,14 @@ export default function ProfilePage({ onLogout }) {
               <div className="contact-target">{c.notify_target}</div>
               <div className="contact-actions">
                 <button className="btn btn-sm" onClick={() => { setEditingContact(c); setShowAddContact(false) }}>编辑</button>
-                <button className="btn btn-sm btn-danger" onClick={() => deleteContact(c.id)}>删除</button>
+                {confirmDeleteContact === c.id ? (
+                  <>
+                    <button className="btn btn-sm btn-danger" onClick={() => { deleteContact(c.id); setConfirmDeleteContact(null) }}>确认</button>
+                    <button className="btn btn-sm" onClick={() => setConfirmDeleteContact(null)}>取消</button>
+                  </>
+                ) : (
+                  <button className="btn btn-sm btn-danger" onClick={() => setConfirmDeleteContact(c.id)}>删除</button>
+                )}
               </div>
             </div>
           ))}
@@ -509,6 +531,18 @@ export default function ProfilePage({ onLogout }) {
       </div>
 
       <button className="btn btn-danger" style={{ width: '100%', marginTop: 16 }} onClick={onLogout}>退出登录</button>
+
+      {alertModal && (
+        <div className="modal-overlay" onClick={() => setAlertModal(null)}>
+          <div className="modal-content" onClick={e => e.stopPropagation()}>
+            <h3>提示</h3>
+            <p className="modal-hint">{alertModal}</p>
+            <div className="btn-row" style={{ marginTop: 16 }}>
+              <button className="btn btn-primary" onClick={() => setAlertModal(null)}>确定</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

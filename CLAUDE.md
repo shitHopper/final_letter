@@ -63,7 +63,7 @@ The app also includes emergency contacts (notified during alert→push transitio
 - **JWT-based auth**: Login/register issues JWT tokens stored in httpOnly cookies. Token payload includes `tokenVersion` for invalidation. Cookie options are dynamic: HTTPS uses `sameSite: 'none', secure: true`; HTTP uses `sameSite: 'lax', secure: false` (via `getCookieOptions(req)`). Token expires in 7 days (3 days for register).
 - **token_version invalidation**: Password change/reset bumps `users.token_version`. Auth middleware compares JWT `tokenVersion` against DB — mismatch forces re-login. This invalidates all existing tokens for that user.
 - **CSRF protection**: Middleware on state-changing requests (POST/PUT/DELETE) validates Origin/Referer header against allowed CORS origins. GET/HEAD/OPTIONS and requests without origin headers (native apps, curl) are exempt.
-- **Password hashing**: Server-side scrypt with random 16-byte salt. Password length: 4–16 characters.
+- **Password hashing**: Server-side scrypt with random 16-byte salt. Password length: 8–16 characters, must contain both letters and numbers.
 - **Input validation**: All user input has character limits enforced server-side: nickname ≤50, signature ≤200, letter title ≤100, letter content ≤10000, post content ≤1000, comment ≤300, check-in notify custom message ≤500, contact name ≤50, contact target ≤200, letter password ≤16.
 - **Force reset**: Users without a password can no longer log in directly — login returns `403` with `needSetPassword: true`. They must use `POST /api/auth/set-password` first.
 - **Email binding**: Existing users without an email are redirected to a bind-email page after login (similar to force-reset flow). `GET /api/auth/me` returns `needBindEmail: true` when email is NULL.
@@ -73,7 +73,7 @@ The app also includes emergency contacts (notified during alert→push transitio
 - **Auth middleware**: All API endpoints (except register/login/send-code) require valid JWT via `auth` middleware. Middleware queries DB for current `token_version` on each request.
 - **Rate limiting**: Register/login/send-code: 10 requests per 15 min; Letter password verification: 20 requests per 15 min; Password change/reset: 5 requests per 15 min.
 - **Security headers**: CSP, X-Content-Type-Options, X-Frame-Options set on all responses.
-- **XSS prevention**: HTML email templates use `escapeHtml()` for all user-generated content (nickname, message, letter title/content).
+- **XSS prevention**: HTML email templates use `escapeHtml()` for all user-generated content (nickname, message, letter title/content). Frontend relies on React's default HTML escaping — **never use `dangerouslySetInnerHTML` to render user-generated content**. If rich text is needed in the future, sanitize with DOMPurify first.
 - **Image validation**: File extension whitelist (.jpg/.jpeg/.png/.gif/.webp), SVG blocked, MIME type check, 5MB limit.
 - **JWT_SECRET env var required**: Server refuses to start without it.
 - **Letter access tokens**: After password verification, a short-lived token (5 min TTL) is issued and must be passed as `x-letter-token` header to `GET /api/letters/:id`. Tokens are persisted in `letter_verify_tokens` DB table (survives server restart). Scheduler cleans up expired tokens every 5 minutes. Prevents replay of verified access.
@@ -128,13 +128,13 @@ Tunnel 配置文件：`~/.cloudflared/config.yml`（ingress 规则指向 `http:/
 ## API Endpoints Summary
 
 ### Auth
-POST `/api/auth/register` (发验证码) → `/api/auth/register/verify` (验证码+创建用户) | `/api/auth/login` (account=nickname|email) | `/api/auth/logout` | `GET /api/auth/me` (含 email, emailVerified, needBindEmail) | `/api/auth/set-password` | `/api/auth/send-code` (type=register|bind|reset_password) | `/api/auth/bind-email` | `/api/auth/reset-password-request` → `/api/auth/reset-password`
+POST `/api/auth/send-code` (type=register|bind|reset_password) → `/api/auth/register/verify` (验证码+创建用户) | `/api/auth/login` (account=nickname|email) | `/api/auth/logout` | `GET /api/auth/me` (含 email, emailVerified, needBindEmail) | `/api/auth/set-password` | `/api/auth/bind-email` | `/api/auth/reset-password-request` → `/api/auth/reset-password`
 
 ### Users
 `GET /api/users/me` | `PUT /api/users/me` (nickname, signature, avatarUrl, gender) | `POST /api/users/me/avatar` | `POST /api/users/me/change-password` | `GET /api/users/:id` (其他用户公开信息)
 
 ### Letters
-`GET /api/letters` (has_password 替代 password) | `POST /api/letters` (push_method=4 时 pushTarget 可为空) | `GET /api/letters/:id` (需 x-letter-token header) | `PUT /api/letters/:id` | `DELETE /api/letters/:id` | `POST /api/letters/:id/verify` (返回 accessToken, 5min TTL)
+`GET /api/letters` (has_password 替代 password) | `POST /api/letters` (push_method=4 时 pushTarget 可为空) | `GET /api/letters/:id` (需 x-letter-token header) | `PUT /api/letters/:id` | `DELETE /api/letters/:id` (有密码时需 x-letter-token header) | `POST /api/letters/:id/verify` (返回 accessToken, 5min TTL)
 
 ### Posts (Community)
 `GET /api/posts` (含 comment_count) | `POST /api/posts` | `DELETE /api/posts/:id` | `POST /api/posts/:id/like` (toggle) | `GET /api/posts/:id/comments` | `POST /api/posts/:id/comments` (replyToId 可选) | `DELETE /api/comments/:id`
@@ -147,8 +147,8 @@ POST `/api/auth/register` (发验证码) → `/api/auth/register/verify` (验证
 
 ## Key Technical Details
 
-- **sql.js persistence**: Database lives in memory and is throttled-saved to `juebixin.db` (500ms debounce). Data loss possible if process crashes within the debounce window. `SIGINT`/`SIGTERM` handlers force-save.
-- **DB helpers**: Shared `all`, `run`, `runCritical`, `get`, `runTransaction` functions extracted into `db-helpers.js`. `run` returns rows modified count. `runCritical` performs immediate synchronous file save (bypasses the 500ms throttle) for key writes (letter send/delete, status transitions). `runTransaction` wraps operations in `BEGIN`/`COMMIT`/`ROLLBACK` for atomicity.
+- **sql.js persistence**: Database lives in memory and is throttled-saved to `juebixin.db` (500ms debounce). All data writes use `runCritical` or `runTransaction({ critical: true })` for immediate synchronous persistence — no data loss on crash within the throttle window. `SIGINT`/`SIGTERM` handlers also force-save.
+- **DB helpers**: Shared `all`, `runCritical`, `get`, `runTransaction` functions extracted into `db-helpers.js`. `runCritical` performs immediate synchronous file save (bypasses the 500ms throttle). `runTransaction` wraps operations in `BEGIN`/`COMMIT`/`ROLLBACK` for atomicity; always called with `{ critical: true }` to ensure immediate persistence. The plain `run()` helper (throttled save) still exists in `db-helpers.js` but is no longer used by server.js or scheduler.js.
 - **token_version flow**: JWT payload carries `tokenVersion`. Password change, password reset, and force-set-password all execute `token_version = token_version + 1`. Auth middleware reads current `token_version` from DB per request and rejects mismatched tokens with 401. This ensures stolen tokens are invalidated when the user changes their password.
 - **Scheduler race protection**: Uses recursive `setTimeout` (not `setInterval`) to prevent overlapping executions. Phase 1 uses SQL-level `WHERE status = 'alert'` guard. Phase 2 re-queries user's current status before sending letters — skips if user has since checked in and returned to `alert`.
 - **Two-phase check-in**: `alert` → `push` → letter delivery. Check-in resets to `alert` phase, clears `push_started_at`, and updates `alert_started_at`. UPDATE uses `WHERE status IN ('alert', 'push')` to prevent overwriting scheduler state.

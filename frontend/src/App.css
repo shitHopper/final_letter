@@ -1089,6 +1089,12 @@ body {
   margin-bottom: 12px;
 }
 
+.profile-realname {
+  font-size: 14px;
+  color: var(--text-2);
+  margin-bottom: 4px;
+}
+
 .password-form {
   display: flex;
   flex-direction: column;

@@ -41,7 +41,7 @@ async function sendEmail(to, subject, html) {
 
 // ========== 联系人通知 ==========
 
-async function notifyContacts(userId, subject, message) {
+async function notifyContacts(userId, subject, message, identityInfo) {
   const user = get("SELECT * FROM users WHERE id = ?", [userId]);
   if (!user) return;
   const contacts = all("SELECT * FROM contacts WHERE user_id = ?", [userId]);
@@ -50,11 +50,19 @@ async function notifyContacts(userId, subject, message) {
     return;
   }
 
+  const identityName = user.real_name || user.nickname;
+
   for (const contact of contacts) {
     if (contact.notify_method === 1) {
+      const identityBlock = identityInfo
+        ? `<div style="background:#ffeaa7;border-radius:8px;padding:12px;margin:12px 0;font-size:14px;">
+            <strong>身份声明：</strong>${identityInfo}
+          </div>`
+        : '';
       const html = `<div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:20px;">
         <h2 style="color:#e74c3c;">来自「绝笔信」的紧急通知</h2>
-        <p><strong>${escapeHtml(user.nickname)}</strong> 的联系人收到以下消息：</p>
+        <p><strong>${escapeHtml(identityName)}</strong> 的联系人收到以下消息：</p>
+        ${identityBlock}
         <div style="background:#fff3cd;border-radius:12px;padding:16px;margin:16px 0;">
           <p style="white-space:pre-wrap;line-height:1.8;font-size:16px;">${escapeHtml(message)}</p>
         </div>
@@ -71,7 +79,7 @@ async function notifyContacts(userId, subject, message) {
 
 function publishToCommunity(userId, letter) {
   const content = `【遗书送达】${letter.title}\n\n${letter.content}`;
-  run("INSERT INTO posts (user_id, content, image_url) VALUES (?, ?, ?)", [userId, content, "[]"]);
+  runCritical("INSERT INTO posts (user_id, content, image_url) VALUES (?, ?, ?)", [userId, content, "[]"]);
   console.log(`[社区-已公开] 用户${userId}的信件"${letter.title}"已公开到社区`);
 }
 
@@ -82,7 +90,7 @@ async function checkOverdueAndSend() {
 
   // ===== 阶段1：预警期限超时 → 发送求救信息，进入推送期限 =====
   const alertOverdueUsers = all(`
-    SELECT id, nickname, alert_started_at, alert_interval_days
+    SELECT id, nickname, real_name, email, alert_started_at, alert_interval_days
     FROM users
     WHERE status = 'alert' AND alert_started_at IS NOT NULL
   `).filter(u => {
@@ -93,20 +101,26 @@ async function checkOverdueAndSend() {
   for (const user of alertOverdueUsers) {
     console.log(`[调度] 用户"${user.nickname}"(id=${user.id})预警期限超时，发送求救信息`);
 
-    await notifyContacts(user.id, `紧急：${user.nickname} 可能需要帮助`, "我可能遇上了麻烦，我可能失联了，请寻找我。");
+    const identityName = user.real_name || user.nickname;
+    let identityInfo = `我是${escapeHtml(identityName)}`;
+    if (user.email) identityInfo += `，注册邮箱：${escapeHtml(user.email)}`;
+
+    await notifyContacts(user.id, `紧急：${identityName} 可能需要帮助`,
+      `我是${identityName}${user.email ? '，注册邮箱：' + user.email : ''}。我可能遇上了麻烦，我可能失联了，请寻找我。`, identityInfo);
 
     // 事务保护：确认状态仍为 alert 再更新，防止与打卡接口竞态
-    runTransaction(() => {
+    const modified = runTransaction(() => {
       db.run("UPDATE users SET status = 'push', push_started_at = ? WHERE id = ? AND status = 'alert'", [new Date().toISOString(), user.id]);
-      if (!db.getRowsModified()) {
-        console.log(`[调度] 用户${user.id}状态已变更，跳过更新`);
-      }
-    });
+      return db.getRowsModified();
+    }, { critical: true });
+    if (!modified) {
+      console.log(`[调度] 用户${user.id}状态已变更，跳过更新`);
+    }
   }
 
   // ===== 阶段2：推送期限超时 → 发送遗书 =====
   const pushOverdueUsers = all(`
-    SELECT id, nickname, push_started_at, push_interval_days
+    SELECT id, nickname, real_name, email, push_started_at, push_interval_days
     FROM users
     WHERE status = 'push' AND push_started_at IS NOT NULL
   `).filter(u => {
@@ -132,12 +146,15 @@ async function checkOverdueAndSend() {
 
       for (const letter of letters) {
         let sent = false;
+        const identityName = user.real_name || user.nickname;
 
         switch (letter.push_method) {
           case 1: {
+            const identityLine = user.email ? `<p style="font-size:14px;color:#636e72;">注册邮箱：${escapeHtml(user.email)}</p>` : '';
             const html = `<div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:20px;">
               <h2 style="color:#6c5ce7;">来自「绝笔信」的一封信</h2>
-              <p>用户 <strong>${escapeHtml(user.nickname)}</strong> 未能按时打卡，以下是其留下的信件：</p>
+              <p>用户 <strong>${escapeHtml(identityName)}</strong> 未能按时打卡，以下是其留下的信件：</p>
+              ${identityLine}
               <div style="background:#f8f9fa;border-radius:12px;padding:16px;margin:16px 0;">
                 <h3>${escapeHtml(letter.title)}</h3>
                 <p style="white-space:pre-wrap;line-height:1.8;">${escapeHtml(letter.content)}</p>
@@ -176,10 +193,10 @@ async function checkOverdueAndSend() {
     }
   }
 
-  // 清理过期验证码
-  run("DELETE FROM email_verification_codes WHERE expires_at < datetime('now')");
+  // 清理过期验证码（保留30分钟内记录用于累计尝试计数）
+  runCritical("DELETE FROM email_verification_codes WHERE created_at < datetime('now', '-30 minutes')");
   // 清理过期信件验证 token
-  run("DELETE FROM letter_verify_tokens WHERE expires_at < datetime('now')");
+  runCritical("DELETE FROM letter_verify_tokens WHERE expires_at < datetime('now')");
 }
 
 function startScheduler(dbInstance, saveFn) {

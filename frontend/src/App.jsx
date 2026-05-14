@@ -20,7 +20,7 @@ function ForceResetPage({ user, onDone }) {
 
   const handleSubmit = async (e) => {
     e.preventDefault()
-    if (password.length < 4) { setError('密码至少4位'); return }
+    if (password.length < 8) { setError('密码至少8位'); return }
     if (password.length > 16) { setError('密码最多16位'); return }
     if (password !== confirmPwd) { setError('两次密码不一致'); return }
     try {
@@ -46,7 +46,7 @@ function ForceResetPage({ user, onDone }) {
         <form onSubmit={handleSubmit}>
           <input
             type="password"
-            placeholder="设置密码（4-16位）"
+            placeholder="设置密码（8-16位）"
             value={password}
             onChange={e => { setPassword(e.target.value); setError('') }}
             maxLength={16}
@@ -212,7 +212,7 @@ function ResetPasswordPage({ onBack }) {
     if (!email.trim()) { setError('请输入邮箱'); return }
     if (!code) { setError('请输入验证码'); return }
     if (!newPassword) { setError('请输入新密码'); return }
-    if (newPassword.length < 4) { setError('密码至少4位'); return }
+    if (newPassword.length < 8) { setError('密码至少8位'); return }
     if (newPassword.length > 16) { setError('密码最多16位'); return }
     if (newPassword !== confirmPwd) { setError('两次密码不一致'); return }
     setError('')
@@ -278,7 +278,7 @@ function ResetPasswordPage({ onBack }) {
             <>
               <input
                 type="password"
-                placeholder="新密码（4-16位）"
+                placeholder="新密码（8-16位）"
                 value={newPassword}
                 onChange={e => { setNewPassword(e.target.value); setError('') }}
                 maxLength={16}
@@ -358,7 +358,7 @@ function LoginPage({ onLogin }) {
     if (!code) { setError('请输入验证码'); return }
     if (!nickname.trim()) { setError('请输入昵称'); return }
     if (!password) { setError('请输入密码'); return }
-    if (password.length < 4) { setError('密码至少4位'); return }
+    if (password.length < 8) { setError('密码至少8位'); return }
     if (password.length > 16) { setError('密码最多16位'); return }
     if (password !== confirmPwd) { setError('两次密码不一致'); return }
     setError('')
@@ -469,7 +469,7 @@ function LoginPage({ onLogin }) {
                 />
                 <input
                   type="password"
-                  placeholder="密码（4-16位）"
+                  placeholder="密码（8-16位）"
                   value={password}
                   onChange={e => { setPassword(e.target.value); setError('') }}
                   maxLength={16}

@@ -27,7 +27,7 @@ function PasswordModal({ onVerified, onClose, isSet, externalError }) {
   const handleSubmit = (e) => {
     e.preventDefault()
     if (!isSet) {
-      if (password.length < 4) { setError('密码至少4位'); return }
+      if (password.length < 8) { setError('密码至少8位'); return }
       if (password.length > 16) { setError('密码最多16位'); return }
       if (password !== confirmPwd) { setError('两次密码不一致'); return }
       onVerified(password)
@@ -45,7 +45,7 @@ function PasswordModal({ onVerified, onClose, isSet, externalError }) {
       <form onSubmit={handleSubmit}>
         <input
           type="password"
-          placeholder={isSet ? '请输入密码' : '设置密码（4-16位）'}
+          placeholder={isSet ? '请输入密码' : '设置密码（8-16位）'}
           value={password}
           onChange={e => { setPassword(e.target.value); setError(''); onVerified(null) }}
           autoFocus
@@ -93,6 +93,8 @@ export default function LettersPage({ userId }) {
   const [pwdModalTarget, setPwdModalTarget] = useState(null)
   const [pwdError, setPwdError] = useState('')
   const [deleteTarget, setDeleteTarget] = useState(null)
+  const [letterTokens, setLetterTokens] = useState({})
+  const [alertModal, setAlertModal] = useState(null)
 
   const fetchLetters = async () => {
     try {
@@ -105,9 +107,23 @@ export default function LettersPage({ userId }) {
 
   const createLetter = async (e) => {
     e.preventDefault()
-    if (form.password && form.password.length > 16) {
-      alert('查看密码最多16位')
+    if (form.title.length > 100) {
+      setAlertModal('信件标题最多100个字符')
       return
+    }
+    if (form.content.length > 10000) {
+      setAlertModal('信件内容最多10000个字符')
+      return
+    }
+    if (form.password) {
+      if (form.password.length < 8) {
+        setAlertModal('查看密码至少8位')
+        return
+      }
+      if (form.password.length > 16) {
+        setAlertModal('查看密码最多16位')
+        return
+      }
     }
     try {
       const data = await apiFetchJson('/api/letters', {
@@ -128,12 +144,28 @@ export default function LettersPage({ userId }) {
 
   const updateLetter = async () => {
     try {
+      if (editForm.title.length > 100) {
+        setAlertModal('信件标题最多100个字符')
+        return
+      }
+      if (editForm.content.length > 10000) {
+        setAlertModal('信件内容最多10000个字符')
+        return
+      }
       let passwordToSend
       if (editForm.clearPassword) {
         passwordToSend = null
       } else if (editForm.password === '') {
         passwordToSend = undefined
       } else {
+        if (editForm.password.length < 8) {
+          setAlertModal('查看密码至少8位')
+          return
+        }
+        if (editForm.password.length > 16) {
+          setAlertModal('查看密码最多16位')
+          return
+        }
         passwordToSend = editForm.password
       }
       const data = await apiFetchJson(`/api/letters/${editingLetter.id}`, {
@@ -160,7 +192,10 @@ export default function LettersPage({ userId }) {
 
   const doDelete = async (id) => {
     try {
-      await apiFetchJson(`/api/letters/${id}`, { method: 'DELETE' })
+      const token = letterTokens[id]
+      const headers = token ? { 'x-letter-token': token } : {}
+      await apiFetchJson(`/api/letters/${id}`, { method: 'DELETE', headers })
+      setLetterTokens(prev => { const next = { ...prev }; delete next[id]; return next })
     } catch (e) { console.error('删除信件失败:', e) }
     setDeleteTarget(null)
     setViewingLetter(null)
@@ -177,6 +212,7 @@ export default function LettersPage({ userId }) {
       const verifyData = await apiFetchJson(`/api/letters/${letter.id}/verify`, { method: 'POST' })
       if (!verifyData.verified) return
       const token = verifyData.accessToken
+      setLetterTokens(prev => ({ ...prev, [letter.id]: token }))
       const data = await apiFetchJson(`/api/letters/${letter.id}`, {
         headers: token ? { 'x-letter-token': token } : {},
       })
@@ -195,10 +231,15 @@ export default function LettersPage({ userId }) {
       })
       if (data.verified) {
         const token = data.accessToken
-        const letter = await apiFetchJson(`/api/letters/${pwdModalTarget.id}`, {
-          headers: token ? { 'x-letter-token': token } : {},
-        })
-        setViewingLetter(letter)
+        setLetterTokens(prev => ({ ...prev, [pwdModalTarget.id]: token }))
+        if (pwdModalTarget._deleteMode) {
+          setDeleteTarget(pwdModalTarget.id)
+        } else {
+          const letter = await apiFetchJson(`/api/letters/${pwdModalTarget.id}`, {
+            headers: token ? { 'x-letter-token': token } : {},
+          })
+          setViewingLetter(letter)
+        }
         setPwdModalTarget(null)
         setPwdError('')
       } else {
@@ -266,7 +307,7 @@ export default function LettersPage({ userId }) {
           />
           <input
             type="password"
-            placeholder="查看密码（可选，4-16位，保护信件隐私）"
+            placeholder="查看密码（可选，8-16位，保护信件隐私）"
             value={form.password}
             onChange={e => setForm({ ...form, password: e.target.value })}
             maxLength={16}
@@ -301,10 +342,18 @@ export default function LettersPage({ userId }) {
                 : '点击查看完整内容'}
             </p>
             <div className="letter-footer">
-              <span className="letter-date">{parseUTC(letter.created_at).toLocaleDateString()}</span>
+              <span className="letter-date">{parseUTC(letter.created_at)?.toLocaleDateString() || ''}</span>
               <button
                 className="btn btn-danger btn-sm"
-                onClick={e => { e.stopPropagation(); setDeleteTarget(letter.id) }}
+                onClick={e => {
+                  e.stopPropagation()
+                  if (letter.has_password && !letterTokens[letter.id]) {
+                    setPwdError('')
+                    setPwdModalTarget({ ...letter, _deleteMode: true })
+                  } else {
+                    setDeleteTarget(letter.id)
+                  }
+                }}
               >
                 删除
               </button>
@@ -331,7 +380,7 @@ export default function LettersPage({ userId }) {
           <div className="letter-full-content">{viewingLetter.content}</div>
           <div className="letter-meta">
             <span>推送目标：{viewingLetter.push_target || '无'}</span>
-            <span>创建时间：{parseUTC(viewingLetter.created_at).toLocaleString()}</span>
+            <span>创建时间：{parseUTC(viewingLetter.created_at)?.toLocaleString() || ''}</span>
           </div>
           <div className="btn-row" style={{ marginTop: 16 }}>
             <button className="btn btn-primary" onClick={startEdit}>编辑</button>
@@ -401,6 +450,16 @@ export default function LettersPage({ userId }) {
           onConfirm={() => doDelete(deleteTarget)}
           onCancel={() => setDeleteTarget(null)}
         />
+      )}
+
+      {alertModal && (
+        <Modal onClose={() => setAlertModal(null)}>
+          <h3>提示</h3>
+          <p className="modal-hint">{alertModal}</p>
+          <div className="btn-row" style={{ marginTop: 16 }}>
+            <button className="btn btn-primary" onClick={() => setAlertModal(null)}>确定</button>
+          </div>
+        </Modal>
       )}
     </div>
   )
