@@ -41,6 +41,7 @@ The app also includes emergency contacts (notified during alert→push transitio
   - `Letters.jsx` — CRUD for farewell letters with server-side password protection (scrypt hash), letter access token flow, and push method selection
   - `Community.jsx` — Social feed with image uploads (up to 9 per post), likes, threaded comments, delete with confirmation, click user avatar/name to view profile card
   - `Profile.jsx` — User profile editing (nickname, signature, avatar upload, gender), email display/change, password change, emergency contacts management (CRUD), check-in stats display
+- `src/utils.js` — Shared utility functions (`parseUTC` for UTC datetime parsing)
 - `src/App.css` — Single global stylesheet with CSS custom properties (theming via `:root` variables)
 - Vite dev server proxies `/api` → `http://localhost:3000`, `/uploads` → `http://localhost:3000`, and `/amap` → `https://restapi.amap.com`
 
@@ -52,6 +53,7 @@ The app also includes emergency contacts (notified during alert→push transitio
 - `post_likes` — composite PK (post_id, user_id)
 - `contacts` — id, user_id, name, notify_method (1=email, 2=SMS), notify_target, created_at
 - `email_verification_codes` — id, email, code, type ('register'|'bind'|'reset_password'), user_id, attempts, expires_at, created_at
+- `letter_verify_tokens` — letter_id (PK), token, expires_at
 
 ### Push Methods
 1 = 电子邮件 (email, 阿里云邮件推送), 2 = 手机短信 (SMS, 模拟中), 3 = 实体邮信 (physical mail, 模拟中), 4 = 公开到社区 (community post, 已实现). Email delivery uses nodemailer with Aliyun SMTP; SMS and physical mail are simulated (console log).
@@ -61,8 +63,8 @@ The app also includes emergency contacts (notified during alert→push transitio
 - **JWT-based auth**: Login/register issues JWT tokens stored in httpOnly cookies. Token payload includes `tokenVersion` for invalidation. Cookie options are dynamic: HTTPS uses `sameSite: 'none', secure: true`; HTTP uses `sameSite: 'lax', secure: false` (via `getCookieOptions(req)`). Token expires in 7 days (3 days for register).
 - **token_version invalidation**: Password change/reset bumps `users.token_version`. Auth middleware compares JWT `tokenVersion` against DB — mismatch forces re-login. This invalidates all existing tokens for that user.
 - **CSRF protection**: Middleware on state-changing requests (POST/PUT/DELETE) validates Origin/Referer header against allowed CORS origins. GET/HEAD/OPTIONS and requests without origin headers (native apps, curl) are exempt.
-- **Password hashing**: Server-side scrypt with random 16-byte salt. Minimum password length: 4 characters.
-- **Input validation**: All user input has character limits enforced server-side: nickname ≤50, signature ≤200, letter title ≤100, letter content ≤10000, post content ≤1000, comment ≤300, check-in notify custom message ≤500, contact name ≤50, contact target ≤200.
+- **Password hashing**: Server-side scrypt with random 16-byte salt. Password length: 4–16 characters.
+- **Input validation**: All user input has character limits enforced server-side: nickname ≤50, signature ≤200, letter title ≤100, letter content ≤10000, post content ≤1000, comment ≤300, check-in notify custom message ≤500, contact name ≤50, contact target ≤200, letter password ≤16.
 - **Force reset**: Users without a password can no longer log in directly — login returns `403` with `needSetPassword: true`. They must use `POST /api/auth/set-password` first.
 - **Email binding**: Existing users without an email are redirected to a bind-email page after login (similar to force-reset flow). `GET /api/auth/me` returns `needBindEmail: true` when email is NULL.
 - **Email verification codes**: 6-digit code, 5-minute expiry, max 5 failed attempts per code. Sending rate-limited: 60s interval, 10/day per email.
@@ -74,7 +76,7 @@ The app also includes emergency contacts (notified during alert→push transitio
 - **XSS prevention**: HTML email templates use `escapeHtml()` for all user-generated content (nickname, message, letter title/content).
 - **Image validation**: File extension whitelist (.jpg/.jpeg/.png/.gif/.webp), SVG blocked, MIME type check, 5MB limit.
 - **JWT_SECRET env var required**: Server refuses to start without it.
-- **Letter access tokens**: After password verification, a short-lived token (5 min TTL) is issued and must be passed as `x-letter-token` header to `GET /api/letters/:id`. Prevents replay of verified access.
+- **Letter access tokens**: After password verification, a short-lived token (5 min TTL) is issued and must be passed as `x-letter-token` header to `GET /api/letters/:id`. Tokens are persisted in `letter_verify_tokens` DB table (survives server restart). Scheduler cleans up expired tokens every 5 minutes. Prevents replay of verified access.
 
 ## Environment Variables
 
@@ -93,7 +95,7 @@ Runs every 5 minutes via recursive `setTimeout` (not `setInterval`) — ensures 
 
 1. **Phase 1 — Alert overdue**: Users in `alert` status whose `alert_started_at + alert_interval_days` has passed → notify all emergency contacts (求救信息), set status to `push`, record `push_started_at`. Uses `runTransaction` with `WHERE status = 'alert'` guard for race-condition protection.
 2. **Phase 2 — Push overdue**: Users in `push` status whose `push_started_at + push_interval_days` has passed → re-queries current user status before acting (additional race-condition guard against check-in between query and send), then sends all unsent letters. Successfully sent letters marked via `runCritical` (immediate sync to avoid data loss on crash).
-3. **Housekeeping**: Expired email verification codes are cleaned up each cycle.
+3. **Housekeeping**: Expired email verification codes and expired letter verify tokens are cleaned up each cycle.
 
 ## Development Commands
 
@@ -150,10 +152,11 @@ POST `/api/auth/register` (发验证码) → `/api/auth/register/verify` (验证
 - **token_version flow**: JWT payload carries `tokenVersion`. Password change, password reset, and force-set-password all execute `token_version = token_version + 1`. Auth middleware reads current `token_version` from DB per request and rejects mismatched tokens with 401. This ensures stolen tokens are invalidated when the user changes their password.
 - **Scheduler race protection**: Uses recursive `setTimeout` (not `setInterval`) to prevent overlapping executions. Phase 1 uses SQL-level `WHERE status = 'alert'` guard. Phase 2 re-queries user's current status before sending letters — skips if user has since checked in and returned to `alert`.
 - **Two-phase check-in**: `alert` → `push` → letter delivery. Check-in resets to `alert` phase, clears `push_started_at`, and updates `alert_started_at`. UPDATE uses `WHERE status IN ('alert', 'push')` to prevent overwriting scheduler state.
-- **Letter password protection**: Server-side scrypt hash stored in `letters.password` column. Verification via `POST /api/letters/:id/verify` returns a short-lived `accessToken` (5 min). Subsequent `GET /api/letters/:id` requires `x-letter-token` header. `stripPassword()` adds `has_password` boolean for frontend display.
+- **Letter password protection**: Server-side scrypt hash stored in `letters.password` column. Verification via `POST /api/letters/:id/verify` returns a short-lived `accessToken` (5 min). Subsequent `GET /api/letters/:id` requires `x-letter-token` header. `stripPassword()` adds `has_password` boolean for frontend display. Edit form uses `has_password` (not `password`) to conditionally show the "清除密码保护" checkbox — sending `password: null` clears the password.
 - **Contact notifications**: On check-in, users can optionally notify contacts with preset ("我还安好" / "我已回来") or custom messages (max 500 chars). On alert→push transition, contacts are automatically notified.
 - **Amap integration**: Requires `AMAP_KEY` env var for nearby clinics. Falls back to hardcoded Beijing/Shanghai/Guangzhou clinics when key is missing or geolocation fails.
 - **Image uploads**: Stored as files in `backend/uploads/`, served as static assets at `/uploads/`. Post image URLs validated server-side (must start with `/uploads/`, extension whitelist) and stored as JSON string arrays in the `image_url` column.
 - **User profile cards in community**: Clicking avatar or name on posts/comments/replies shows a floating card with public profile info (nickname, avatar, gender, signature). Card is positioned near the clicked element. Implemented via `GET /api/users/:id` and `handleViewUser` in Community.jsx.
 - **Email verification codes**: Stored in `email_verification_codes` table. Code is 6-digit numeric, 5-minute TTL, max 5 failed verification attempts per code. New code invalidates previous code for same email+type. Scheduler cleans up expired codes every 5 minutes.
 - **Chinese-language codebase**: UI text, comments, and error messages are in Chinese. Maintain this convention.
+- **Shared utilities**: `frontend/src/utils.js` contains shared helpers like `parseUTC()` (converts SQLite datetime strings to JS Date objects). Imported by Letters.jsx and Profile.jsx.

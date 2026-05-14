@@ -178,6 +178,8 @@ async function checkOverdueAndSend() {
 
   // 清理过期验证码
   run("DELETE FROM email_verification_codes WHERE expires_at < datetime('now')");
+  // 清理过期信件验证 token
+  run("DELETE FROM letter_verify_tokens WHERE expires_at < datetime('now')");
 }
 
 function startScheduler(dbInstance, saveFn) {

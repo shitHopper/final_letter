@@ -21,6 +21,7 @@ function ForceResetPage({ user, onDone }) {
   const handleSubmit = async (e) => {
     e.preventDefault()
     if (password.length < 4) { setError('密码至少4位'); return }
+    if (password.length > 16) { setError('密码最多16位'); return }
     if (password !== confirmPwd) { setError('两次密码不一致'); return }
     try {
       const data = await apiFetchJson('/api/auth/set-password', {
@@ -45,9 +46,10 @@ function ForceResetPage({ user, onDone }) {
         <form onSubmit={handleSubmit}>
           <input
             type="password"
-            placeholder="设置密码（至少4位）"
+            placeholder="设置密码（4-16位）"
             value={password}
             onChange={e => { setPassword(e.target.value); setError('') }}
+            maxLength={16}
             autoFocus
           />
           <input
@@ -55,6 +57,7 @@ function ForceResetPage({ user, onDone }) {
             placeholder="确认密码"
             value={confirmPwd}
             onChange={e => { setConfirmPwd(e.target.value); setError('') }}
+            maxLength={16}
           />
           {error && <div className="modal-error">{error}</div>}
           <button className="btn btn-primary" type="submit">确认</button>
@@ -210,6 +213,7 @@ function ResetPasswordPage({ onBack }) {
     if (!code) { setError('请输入验证码'); return }
     if (!newPassword) { setError('请输入新密码'); return }
     if (newPassword.length < 4) { setError('密码至少4位'); return }
+    if (newPassword.length > 16) { setError('密码最多16位'); return }
     if (newPassword !== confirmPwd) { setError('两次密码不一致'); return }
     setError('')
     try {
@@ -274,15 +278,17 @@ function ResetPasswordPage({ onBack }) {
             <>
               <input
                 type="password"
-                placeholder="新密码（至少4位）"
+                placeholder="新密码（4-16位）"
                 value={newPassword}
                 onChange={e => { setNewPassword(e.target.value); setError('') }}
+                maxLength={16}
               />
               <input
                 type="password"
                 placeholder="确认新密码"
                 value={confirmPwd}
                 onChange={e => { setConfirmPwd(e.target.value); setError('') }}
+                maxLength={16}
               />
             </>
           )}
@@ -353,6 +359,7 @@ function LoginPage({ onLogin }) {
     if (!nickname.trim()) { setError('请输入昵称'); return }
     if (!password) { setError('请输入密码'); return }
     if (password.length < 4) { setError('密码至少4位'); return }
+    if (password.length > 16) { setError('密码最多16位'); return }
     if (password !== confirmPwd) { setError('两次密码不一致'); return }
     setError('')
     const res = await apiFetch('/api/auth/register/verify', {
@@ -462,15 +469,17 @@ function LoginPage({ onLogin }) {
                 />
                 <input
                   type="password"
-                  placeholder="密码（至少4位）"
+                  placeholder="密码（4-16位）"
                   value={password}
                   onChange={e => { setPassword(e.target.value); setError('') }}
+                  maxLength={16}
                 />
                 <input
                   type="password"
                   placeholder="确认密码"
                   value={confirmPwd}
                   onChange={e => { setConfirmPwd(e.target.value); setError('') }}
+                  maxLength={16}
                 />
               </>
             )}

@@ -1331,7 +1331,7 @@ body {
 .notify-select-all {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   padding: 6px 8px;
   background: var(--primary-bg);
   border-radius: 6px;
@@ -1344,7 +1344,7 @@ body {
 .notify-contact-item {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   padding: 6px 8px;
   border-radius: 6px;
   cursor: pointer;

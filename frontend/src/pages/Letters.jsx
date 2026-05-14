@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { apiFetch, apiFetchJson } from '../api'
+import { parseUTC } from '../utils'
 
 const PUSH_METHODS = [
   { value: 1, label: '电子邮件' },
@@ -27,6 +28,7 @@ function PasswordModal({ onVerified, onClose, isSet, externalError }) {
     e.preventDefault()
     if (!isSet) {
       if (password.length < 4) { setError('密码至少4位'); return }
+      if (password.length > 16) { setError('密码最多16位'); return }
       if (password !== confirmPwd) { setError('两次密码不一致'); return }
       onVerified(password)
     } else {
@@ -43,7 +45,7 @@ function PasswordModal({ onVerified, onClose, isSet, externalError }) {
       <form onSubmit={handleSubmit}>
         <input
           type="password"
-          placeholder={isSet ? '请输入密码' : '设置密码（至少4位）'}
+          placeholder={isSet ? '请输入密码' : '设置密码（4-16位）'}
           value={password}
           onChange={e => { setPassword(e.target.value); setError(''); onVerified(null) }}
           autoFocus
@@ -87,7 +89,7 @@ export default function LettersPage({ userId }) {
   const [msg, setMsg] = useState('')
   const [viewingLetter, setViewingLetter] = useState(null)
   const [editingLetter, setEditingLetter] = useState(null)
-  const [editForm, setEditForm] = useState({ title: '', content: '', pushMethod: 1, pushTarget: '', password: '' })
+  const [editForm, setEditForm] = useState({ title: '', content: '', pushMethod: 1, pushTarget: '', password: '', clearPassword: false })
   const [pwdModalTarget, setPwdModalTarget] = useState(null)
   const [pwdError, setPwdError] = useState('')
   const [deleteTarget, setDeleteTarget] = useState(null)
@@ -96,13 +98,17 @@ export default function LettersPage({ userId }) {
     try {
       const data = await apiFetchJson('/api/letters')
       setLetters(data)
-    } catch {}
+    } catch (e) { console.error('获取信件失败:', e) }
   }
 
   useEffect(() => { fetchLetters() }, [])
 
   const createLetter = async (e) => {
     e.preventDefault()
+    if (form.password && form.password.length > 16) {
+      alert('查看密码最多16位')
+      return
+    }
     try {
       const data = await apiFetchJson('/api/letters', {
         method: 'POST',
@@ -122,6 +128,14 @@ export default function LettersPage({ userId }) {
 
   const updateLetter = async () => {
     try {
+      let passwordToSend
+      if (editForm.clearPassword) {
+        passwordToSend = null
+      } else if (editForm.password === '') {
+        passwordToSend = undefined
+      } else {
+        passwordToSend = editForm.password
+      }
       const data = await apiFetchJson(`/api/letters/${editingLetter.id}`, {
         method: 'PUT',
         body: JSON.stringify({
@@ -129,7 +143,7 @@ export default function LettersPage({ userId }) {
           content: editForm.content,
           pushMethod: editForm.pushMethod,
           pushTarget: editForm.pushTarget,
-          password: editForm.password || undefined,
+          password: passwordToSend,
         }),
       })
       if (data.success) {
@@ -147,7 +161,7 @@ export default function LettersPage({ userId }) {
   const doDelete = async (id) => {
     try {
       await apiFetchJson(`/api/letters/${id}`, { method: 'DELETE' })
-    } catch {}
+    } catch (e) { console.error('删除信件失败:', e) }
     setDeleteTarget(null)
     setViewingLetter(null)
     fetchLetters()
@@ -202,17 +216,12 @@ export default function LettersPage({ userId }) {
       pushMethod: viewingLetter.push_method,
       pushTarget: viewingLetter.push_target,
       password: '',
+      clearPassword: false,
     })
     setEditingLetter(viewingLetter)
   }
 
   const methodLabel = (v) => PUSH_METHODS.find(m => m.value === v)?.label || '未知'
-
-  const parseUTC = (dateStr) => {
-    if (!dateStr) return null
-    const utcStr = dateStr.includes('T') ? dateStr : dateStr.replace(' ', 'T') + 'Z'
-    return new Date(utcStr)
-  }
 
   return (
     <div className="page letters-page">
@@ -257,9 +266,10 @@ export default function LettersPage({ userId }) {
           />
           <input
             type="password"
-            placeholder="查看密码（可选，保护信件隐私）"
+            placeholder="查看密码（可选，4-16位，保护信件隐私）"
             value={form.password}
             onChange={e => setForm({ ...form, password: e.target.value })}
+            maxLength={16}
           />
           <button className="btn btn-primary" type="submit">保存信件</button>
         </form>
@@ -362,9 +372,20 @@ export default function LettersPage({ userId }) {
             <input
               type="password"
               value={editForm.password}
-              onChange={e => setEditForm({ ...editForm, password: e.target.value })}
-              placeholder={editingLetter.password ? '留空保持原密码' : '设置查看密码（可选）'}
+              onChange={e => setEditForm({ ...editForm, password: e.target.value, clearPassword: false })}
+              placeholder={editingLetter.has_password ? '留空保持原密码，输入新密码则替换' : '设置查看密码（可选）'}
             />
+            {editingLetter.has_password && !editForm.password && (
+              <label style={{ fontSize: 13, color: 'var(--text-2)', display: 'flex', alignItems: 'center', gap: 0, marginTop: 4 }}>
+                <input
+                  type="checkbox"
+                  style={{ margin: 0, marginRight: 4 }}
+                  checked={editForm.clearPassword}
+                  onChange={e => setEditForm({ ...editForm, clearPassword: e.target.checked })}
+                />
+                清除密码保护
+              </label>
+            )}
             <div className="btn-row">
               <button className="btn btn-primary" onClick={updateLetter}>保存</button>
               <button className="btn" onClick={() => setEditingLetter(null)}>取消</button>

@@ -212,50 +212,30 @@ function verifyPassword(password, stored) {
   return crypto.timingSafeEqual(Buffer.from(derived), Buffer.from(key));
 }
 
-// ========== 信件验证 token ==========
+// ========== 信件验证 token（持久化到数据库） ==========
 
-const LETTER_VERIFY_TOKENS = new Map(); // letterId -> { token, expiresAt }
 const VERIFY_TOKEN_TTL = 5 * 60 * 1000; // 5分钟有效
-const VERIFY_TOKEN_MAX = 1000;
 
 function issueVerifyToken(letterId) {
-  // 容量保护：超过上限时清理过期条目，仍超限则淘汰最旧
-  if (LETTER_VERIFY_TOKENS.size >= VERIFY_TOKEN_MAX) {
-    const now = Date.now();
-    for (const [id, entry] of LETTER_VERIFY_TOKENS) {
-      if (now > entry.expiresAt) LETTER_VERIFY_TOKENS.delete(id);
-    }
-    if (LETTER_VERIFY_TOKENS.size >= VERIFY_TOKEN_MAX) {
-      const oldestKey = LETTER_VERIFY_TOKENS.keys().next().value;
-      LETTER_VERIFY_TOKENS.delete(oldestKey);
-    }
-  }
   const token = crypto.randomBytes(32).toString("hex");
-  LETTER_VERIFY_TOKENS.set(letterId, { token, expiresAt: Date.now() + VERIFY_TOKEN_TTL });
+  const expiresAt = new Date(Date.now() + VERIFY_TOKEN_TTL).toISOString();
+  // 先清理该信件的旧 token，再插入新 token
+  run("DELETE FROM letter_verify_tokens WHERE letter_id = ?", [letterId]);
+  run("INSERT INTO letter_verify_tokens (letter_id, token, expires_at) VALUES (?, ?, ?)", [letterId, token, expiresAt]);
   return token;
 }
 
 function consumeVerifyToken(letterId, token) {
-  const entry = LETTER_VERIFY_TOKENS.get(letterId);
-  if (!entry) return false;
-  if (Date.now() > entry.expiresAt) {
-    LETTER_VERIFY_TOKENS.delete(letterId);
+  const row = get("SELECT * FROM letter_verify_tokens WHERE letter_id = ?", [letterId]);
+  if (!row) return false;
+  if (new Date(row.expires_at).getTime() < Date.now()) {
+    run("DELETE FROM letter_verify_tokens WHERE letter_id = ?", [letterId]);
     return false;
   }
-  if (entry.token !== token) {
-    return false;
-  }
-  LETTER_VERIFY_TOKENS.delete(letterId);
+  if (row.token !== token) return false;
+  run("DELETE FROM letter_verify_tokens WHERE letter_id = ?", [letterId]);
   return true;
 }
-
-// 定期清理过期 token
-setInterval(() => {
-  const now = Date.now();
-  for (const [id, entry] of LETTER_VERIFY_TOKENS) {
-    if (now > entry.expiresAt) LETTER_VERIFY_TOKENS.delete(id);
-  }
-}, 60 * 1000);
 
 // 托管前端文件夹，访问域名直接打开网页
 app.use(express.static(path.join(__dirname, '../frontend/dist')));
@@ -285,9 +265,12 @@ function checkSendRateLimit(email, type) {
   if (recent && Date.now() - new Date(recent.created_at).getTime() < 60 * 1000) {
     return false;
   }
-  const todayStart = new Date().toISOString().slice(0, 10) + 'T00:00:00.000Z';
+  // 使用 SQLite 本地时间计算今日零点，避免时区偏差
+  const todayLocal = get("SELECT date('now', 'localtime') as d");
+  const todayStart = todayLocal.d + ' 00:00:00';
+  // created_at 用 datetime('now') 存 UTC，需转成本地时间再比较
   const dailyCount = get(
-    "SELECT COUNT(*) as cnt FROM email_verification_codes WHERE email = ? AND created_at >= ?",
+    "SELECT COUNT(*) as cnt FROM email_verification_codes WHERE email = ? AND datetime(created_at, 'localtime') >= ?",
     [email, todayStart]
   );
   if (dailyCount && dailyCount.cnt >= 10) {
@@ -388,6 +371,8 @@ app.post("/api/auth/register", authLimiter, async (req, res) => {
     return res.status(400).json({ error: "昵称最多50个字符" });
   if (!password || password.length < 4)
     return res.status(400).json({ error: "密码至少4位" });
+  if (password.length > 16)
+    return res.status(400).json({ error: "密码最多16位" });
   const trimmedEmail = email.trim().toLowerCase();
   const existingEmail = get("SELECT id FROM users WHERE email = ? AND email_verified = 1", [trimmedEmail]);
   if (existingEmail)
@@ -414,6 +399,8 @@ app.post("/api/auth/register/verify", authLimiter, (req, res) => {
     return res.status(400).json({ error: "缺少必填字段" });
   if (password.length < 4)
     return res.status(400).json({ error: "密码至少4位" });
+  if (password.length > 16)
+    return res.status(400).json({ error: "密码最多16位" });
   const trimmedEmail = email.trim().toLowerCase();
 
   const result = verifyCode(trimmedEmail, code, 'register');
@@ -506,6 +493,8 @@ app.post("/api/auth/set-password", auth, (req, res) => {
   const { password } = req.body;
   if (!password || password.length < 4)
     return res.status(400).json({ error: "密码至少4位" });
+  if (password.length > 16)
+    return res.status(400).json({ error: "密码最多16位" });
   const hashed = hashPassword(password);
   run("UPDATE users SET password = ?, force_reset = 0, token_version = token_version + 1 WHERE id = ?", [hashed, req.user.id]);
   res.json({ success: true });
@@ -542,6 +531,8 @@ app.post("/api/auth/reset-password", passwordChangeLimiter, (req, res) => {
     return res.status(400).json({ error: "缺少必填字段" });
   if (newPassword.length < 4)
     return res.status(400).json({ error: "密码至少4位" });
+  if (newPassword.length > 16)
+    return res.status(400).json({ error: "密码最多16位" });
   const trimmedEmail = email.trim().toLowerCase();
 
   const result = verifyCode(trimmedEmail, code, 'reset_password');
@@ -697,6 +688,8 @@ app.post("/api/letters", auth, (req, res) => {
     return res.status(400).json({ error: "无效的推送方式" });
   if (method !== 4 && !pushTarget)
     return res.status(400).json({ error: "缺少推送目标" });
+  if (password && password.length > 16)
+    return res.status(400).json({ error: "查看密码最多16位" });
   const hashedLetterPw = password ? hashPassword(password) : null;
   runCritical(
     "INSERT INTO letters (user_id, title, content, push_method, push_target, password) VALUES (?, ?, ?, ?, ?, ?)",
@@ -721,6 +714,8 @@ app.put("/api/letters/:id", auth, (req, res) => {
   const method = Number(pushMethod);
   if (!Number.isInteger(method) || method < 1 || method > 4)
     return res.status(400).json({ error: "无效的推送方式" });
+  if (password !== undefined && password !== null && password.length > 16)
+    return res.status(400).json({ error: "查看密码最多16位" });
   const newPw = password !== undefined ? (password ? hashPassword(password) : null) : letter.password;
   runCritical(
     "UPDATE letters SET title = ?, content = ?, push_method = ?, push_target = ?, password = ?, updated_at = datetime('now') WHERE id = ?",
@@ -946,6 +941,8 @@ app.post("/api/users/me/change-password", auth, passwordChangeLimiter, (req, res
     return res.status(400).json({ error: "请输入旧密码和新密码" });
   if (newPassword.length < 4)
     return res.status(400).json({ error: "新密码至少4位" });
+  if (newPassword.length > 16)
+    return res.status(400).json({ error: "新密码最多16位" });
   const user = get("SELECT password FROM users WHERE id = ?", [req.user.id]);
   if (!user.password || !verifyPassword(oldPassword, user.password))
     return res.status(403).json({ error: "旧密码错误" });
@@ -1038,7 +1035,8 @@ app.get("/api/nearby-clinics", async (req, res) => {
       };
     });
     res.json({ fallback: false, pois });
-  } catch {
+  } catch (err) {
+    console.error('[高德API] 请求失败:', err.message);
     res.json({ fallback: true, pois: [
       { name: "北京心理危机研究与干预中心", address: "北京市西城区德外安康胡同5号", tel: "010-82951332" },
       { name: "上海市精神卫生中心", address: "上海市徐汇区宛平南路600号", tel: "021-64387250" },

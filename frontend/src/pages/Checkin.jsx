@@ -159,14 +159,14 @@ export default function CheckinPage({ userId }) {
       setInfo(data)
       setAlertDays(data.alertIntervalDays)
       setPushDays(data.pushIntervalDays)
-    } catch {}
+    } catch (e) { console.error('获取打卡信息失败:', e) }
   }
 
   const fetchContacts = async () => {
     try {
       const data = await apiFetchJson('/api/contacts')
       setContacts(data)
-    } catch {}
+    } catch (e) { console.error('获取联系人失败:', e) }
   }
 
   const tick = () => {
@@ -262,7 +262,7 @@ export default function CheckinPage({ userId }) {
       setNotifyModal(null)
       setMsg(type === 'back' ? '已通知联系人你回来了' : '已发送安好信息')
       setTimeout(() => setMsg(''), 3000)
-    } catch {}
+    } catch (e) { console.error('发送通知失败:', e) }
   }
 
   const updateInterval = async () => {

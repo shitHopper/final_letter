@@ -190,6 +190,15 @@ async function initDb() {
     )
   `);
 
+  // Letter verify tokens table (replaces in-memory Map)
+  db.run(`
+    CREATE TABLE IF NOT EXISTS letter_verify_tokens (
+      letter_id INTEGER PRIMARY KEY,
+      token TEXT NOT NULL,
+      expires_at TEXT NOT NULL
+    )
+  `);
+
   // Unique index on email (NULL values excluded)
   try {
     db.run("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE email IS NOT NULL");

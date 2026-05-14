@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { apiFetch, apiFetchJson } from '../api'
+import { parseUTC } from '../utils'
 
 const NOTIFY_METHODS = [
   { value: 1, label: '邮件' },
@@ -84,11 +85,6 @@ export default function ProfilePage({ onLogout }) {
   const [emailSending, setEmailSending] = useState(false)
   const [emailError, setEmailError] = useState('')
 
-  const parseUTC = (dateStr) => {
-    const utcStr = dateStr.includes('T') ? dateStr : dateStr.replace(' ', 'T') + 'Z'
-    return new Date(utcStr)
-  }
-
   const fetchUser = async () => {
     try {
       const data = await apiFetchJson('/api/users/me')
@@ -96,11 +92,11 @@ export default function ProfilePage({ onLogout }) {
       setEditNickname(data.nickname)
       setEditSignature(data.signature)
       setEditGender(data.gender || '')
-    } catch {}
+    } catch (e) { console.error('获取用户信息失败:', e) }
   }
 
   const fetchContacts = async () => {
-    try { setContacts(await apiFetchJson('/api/contacts')) } catch {}
+    try { setContacts(await apiFetchJson('/api/contacts')) } catch (e) { console.error('获取联系人失败:', e) }
   }
 
   useEffect(() => { fetchUser(); fetchContacts() }, [])
@@ -126,9 +122,22 @@ export default function ProfilePage({ onLogout }) {
     setTimeout(() => setMsg(''), 2000)
   }
 
+  const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
+  const MAX_AVATAR_SIZE = 5 * 1024 * 1024
+
   const handleAvatarSelect = async (e) => {
     const file = e.target.files?.[0]
     if (!file) return
+    if (!ALLOWED_IMAGE_TYPES.includes(file.type)) {
+      alert('仅支持 JPG、PNG、GIF、WebP 格式')
+      if (avatarInputRef.current) avatarInputRef.current.value = ''
+      return
+    }
+    if (file.size > MAX_AVATAR_SIZE) {
+      alert('图片大小不能超过 5MB')
+      if (avatarInputRef.current) avatarInputRef.current.value = ''
+      return
+    }
     setUploadingAvatar(true)
     try {
       const formData = new FormData()
@@ -153,6 +162,10 @@ export default function ProfilePage({ onLogout }) {
     }
     if (newPassword.length < 4) {
       setPasswordError('新密码至少4位')
+      return
+    }
+    if (newPassword.length > 16) {
+      setPasswordError('新密码最多16位')
       return
     }
     if (newPassword !== confirmPassword) {
@@ -265,7 +278,7 @@ export default function ProfilePage({ onLogout }) {
   }
 
   const deleteContact = async (id) => {
-    try { await apiFetchJson(`/api/contacts/${id}`, { method: 'DELETE' }) } catch {}
+    try { await apiFetchJson(`/api/contacts/${id}`, { method: 'DELETE' }) } catch (e) { console.error('删除联系人失败:', e) }
     fetchContacts()
     setMsg('联系人已删除')
     setTimeout(() => setMsg(''), 2000)
@@ -400,15 +413,17 @@ export default function ProfilePage({ onLogout }) {
             />
             <input
               type="password"
-              placeholder="新密码（至少4位）"
+              placeholder="新密码（4-16位）"
               value={newPassword}
               onChange={e => { setNewPassword(e.target.value); setPasswordError('') }}
+              maxLength={16}
             />
             <input
               type="password"
               placeholder="确认新密码"
               value={confirmPassword}
               onChange={e => { setConfirmPassword(e.target.value); setPasswordError('') }}
+              maxLength={16}
             />
             {passwordError && <div className="modal-error">{passwordError}</div>}
             <div className="btn-row">

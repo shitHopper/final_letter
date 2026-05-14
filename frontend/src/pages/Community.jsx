@@ -30,14 +30,14 @@ export default function CommunityPage({ userId }) {
     try {
       const data = await apiFetchJson(`/api/users/${userId}`)
       setViewingUser(data)
-    } catch {}
+    } catch (e) { console.error('获取用户信息失败:', e) }
   }
 
   const fetchPosts = async () => {
     try {
       const data = await apiFetchJson('/api/posts')
       setPosts(data)
-    } catch {}
+    } catch (e) { console.error('获取帖子失败:', e) }
   }
 
   useEffect(() => { fetchPosts() }, [])
@@ -97,7 +97,7 @@ export default function CommunityPage({ userId }) {
     try {
       const parsed = JSON.parse(imageUrl)
       if (Array.isArray(parsed)) return parsed
-    } catch {}
+    } catch { /* 非 JSON，按旧格式处理 */ }
     return imageUrl ? [imageUrl] : []
   }
 
@@ -109,7 +109,7 @@ export default function CommunityPage({ userId }) {
       if (data.success) {
         fetchPosts()
       }
-    } catch {}
+    } catch (e) { console.error('点赞失败:', e) }
   }
 
   const fetchComments = async (postId) => {
@@ -123,7 +123,7 @@ export default function CommunityPage({ userId }) {
       setComments(prev => ({ ...prev, [postId]: data }))
       setOpenComments(postId)
       setReplyTo(null)
-    } catch {}
+    } catch (e) { console.error('获取评论失败:', e) }
   }
 
   const addComment = async (postId) => {
@@ -152,18 +152,18 @@ export default function CommunityPage({ userId }) {
   }
 
   const deletePost = async (postId) => {
-    try { await apiFetchJson(`/api/posts/${postId}`, { method: 'DELETE' }) } catch {}
+    try { await apiFetchJson(`/api/posts/${postId}`, { method: 'DELETE' }) } catch (e) { console.error('删除帖子失败:', e) }
     setConfirmDelete(null)
     fetchPosts()
   }
 
   const deleteComment = async (commentId, postId) => {
-    try { await apiFetchJson(`/api/comments/${commentId}`, { method: 'DELETE' }) } catch {}
+    try { await apiFetchJson(`/api/comments/${commentId}`, { method: 'DELETE' }) } catch (e) { console.error('删除评论失败:', e) }
     setConfirmDelete(null)
     try {
       const data = await apiFetchJson(`/api/posts/${postId}/comments`)
       setComments(prev => ({ ...prev, [postId]: data }))
-    } catch {}
+    } catch (e) { console.error('刷新评论失败:', e) }
     fetchPosts()
   }
 
@@ -286,15 +286,18 @@ export default function CommunityPage({ userId }) {
               <span className="post-author-name" onClick={(e) => handleViewUser(post.user_id, e)}>{post.nickname}</span>
             </div>
             {post.content && <p className="post-content">{post.content}</p>}
-            {parseImageUrls(post.image_url).length > 0 && (
-              <div className={`post-images post-images-${Math.min(parseImageUrls(post.image_url).length, 3)}`}>
-                {parseImageUrls(post.image_url).map((url, i) => (
-                  <div key={i} className="post-image-item">
-                    <img src={url} alt="" />
-                  </div>
-                ))}
-              </div>
-            )}
+            {(() => {
+              const imgs = parseImageUrls(post.image_url)
+              return imgs.length > 0 && (
+                <div className={`post-images post-images-${Math.min(imgs.length, 3)}`}>
+                  {imgs.map((url, i) => (
+                    <div key={i} className="post-image-item">
+                      <img src={url} alt="" />
+                    </div>
+                  ))}
+                </div>
+              )
+            })()}
             <div className="post-actions">
               <button
                 className={`btn btn-ghost like-btn ${post.liked ? 'liked' : ''}`}
